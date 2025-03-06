@@ -1,2 +1,2 @@
-FROM alpine:3.20
+FROM alpine:3.21.2
 RUN apk add --no-cache postgresql16-client uuidgen restic
