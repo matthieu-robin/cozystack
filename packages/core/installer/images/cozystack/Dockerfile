@@ -26,7 +26,7 @@ RUN go build -o /cozystack-assets-server -ldflags '-extldflags "-static" -w -s' 
 # Check that versions_map is not changed
 RUN make repos
 
-FROM alpine:3.21
+FROM alpine:3.22.1
 
 RUN apk add --no-cache make
 RUN apk add helm kubectl --repository=https://dl-cdn.alpinelinux.org/alpine/edge/community
