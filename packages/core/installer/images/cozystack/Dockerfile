@@ -30,7 +30,7 @@ RUN go build -o /cozystack-assets-server -ldflags '-extldflags "-static" -w -s' 
 
 RUN make repos
 
-FROM alpine:3.22
+FROM alpine:3.23.2
 
 RUN wget -O- https://github.com/cozystack/cozypkg/raw/refs/heads/main/hack/install.sh | sh -s -- -v 1.2.0
 
