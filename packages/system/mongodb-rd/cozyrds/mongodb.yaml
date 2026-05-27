@@ -31,6 +31,17 @@ spec:
     include:
       - resourceNames:
           - mongodb-{{ .name }}-credentials
+      # NOTE: The TLS secret entries below are unconditional. This file is plain
+      # YAML included verbatim by .Files.Get and is NOT processed by the Helm
+      # template engine, so Helm conditionals ({{- if .Values.tls.enabled }})
+      # are not available here. As a result, mongodb-{{ .name }}-ca-cert and
+      # mongodb-{{ .name }}-ssl are always listed in secrets.include regardless
+      # of whether TLS is enabled. The cozystack controller must tolerate
+      # missing secrets for non-TLS instances. Conditional cozyrds support
+      # requires tooling changes and is tracked as a follow-up improvement.
+      - resourceNames:
+          - mongodb-{{ .name }}-ca-cert
+          - mongodb-{{ .name }}-ssl
   services:
     exclude: []
     include:
