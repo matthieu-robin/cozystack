@@ -1,0 +1,29 @@
+#!/bin/sh
+# Fake kubectl for hack/kubernetes-nodes-unpin-hook.bats. Mocks the apiserver
+# boundary of the pre-delete unpin hook's embedded script. Env:
+#   FAKE_MODE      named-object get behavior:
+#                    notfound     "Error from server (NotFound)" exit 1
+#                    error-named  transient server error exit 1 (list still ok)
+#                    pinned       jsonpath read returns "keep"
+#                    unpinned     jsonpath read returns empty, exit 0
+#   FAKE_KMT_NAMES newline-separated names the KMT list query returns
+#   FAKE_CMDLOG    path to append annotate calls to
+log() { [ -n "${FAKE_CMDLOG:-}" ] && echo "$*" >> "$FAKE_CMDLOG"; return 0; }
+args="$*"
+mode="${FAKE_MODE:-notfound}"
+case "$args" in
+  *" annotate "*)
+    log "annotate $args"; exit 0 ;;
+  *"get kubevirtmachinetemplate.infrastructure.cluster.x-k8s.io -o"*)
+    # list query (no /name); succeeds in every mode so error-named proves the
+    # NAMED-get classification specifically, not a blanket outage
+    [ -n "${FAKE_KMT_NAMES:-}" ] && printf '%s\n' "$FAKE_KMT_NAMES"
+    exit 0 ;;
+esac
+# named-object get
+case "$mode" in
+  pinned)      printf 'keep'; exit 0 ;;
+  unpinned)    exit 0 ;;
+  error-named) echo "Error from server: etcdserver: request timed out" >&2; exit 1 ;;
+  *)           echo "Error from server (NotFound): \"$args\" not found" >&2; exit 1 ;;
+esac
