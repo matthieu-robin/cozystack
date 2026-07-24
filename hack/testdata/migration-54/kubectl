@@ -47,6 +47,14 @@ case "$verb" in
     # shellcheck disable=SC2086
     set -- $args
     res=$1; name=$2
+    # Real kubectl rejects a name containing '/' client-side, before any API
+    # call, deterministically -- reproduce that so the migration provably never
+    # issues a read for a composed name that cannot exist.
+    case "$name" in
+      */*)
+        echo "error: there is no need to specify a resource type as a separate argument when passing arguments in resource/name form" >&2
+        exit 1 ;;
+    esac
     case "$res" in
       kubevirtmachinetemplate*)
         case "$name" in

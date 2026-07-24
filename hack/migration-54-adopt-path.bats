@@ -218,9 +218,12 @@ OBJS
   # pin_keep guards pools that cannot be adopted (invalid/overflowing name); a
   # transient read error masked as "absent" there would leave the pool un-pinned
   # for the parent's prune with no child release to notice. Same contract as
-  # adopt_one: non-NotFound read errors abort the run.
+  # adopt_one: read failures abort the run. The key is dotted -- label-invalid,
+  # so the pin path fires, yet a valid object name, so objects can exist and
+  # the pin path genuinely reads; a key that cannot name an object at all is
+  # skipped before any read (covered by the slash test above).
   cat > "$FAKE_HR_LIST" <<'JSON'
-{"items":[{"metadata":{"namespace":"tenant-test","name":"kubernetes-test3"},"spec":{"values":{"nodeGroups":{"My_Pool":{"minReplicas":1}}}}}]}
+{"items":[{"metadata":{"namespace":"tenant-test","name":"kubernetes-test3"},"spec":{"values":{"nodeGroups":{"a.b":{"minReplicas":1}}}}}]}
 JSON
   export FAKE_GET_FAIL="machinedeployment"
   rc=0
@@ -230,6 +233,28 @@ JSON
   grep -q 'ERROR: reading machinedeployment' "$WORK/out"
   ! grep -qF -- "STAMP" "$FAKE_CMDLOG"
   unset FAKE_GET_FAIL
+  rm -rf "$WORK"
+}
+
+@test "a nodeGroup key containing a slash is skipped without a read, not deadlocked on kubectl's client-side rejection" {
+  prep
+  # A composed object name with a '/' is rejected by real kubectl client-side,
+  # deterministically, before any API call -- so if the pin path issued a read
+  # for it, the fail-closed classification would abort the run on every retry,
+  # deadlocking the upgrade over a pool that provably cannot exist (the old
+  # chart's apply of such a name would have been rejected by the apiserver).
+  # The pin path must skip such names statically: nothing to pin, no read made.
+  cat > "$FAKE_HR_LIST" <<'JSON'
+{"items":[{"metadata":{"namespace":"tenant-test","name":"kubernetes-test3"},"spec":{"values":{"nodeGroups":{"pool/a":{"minReplicas":1}}}}}]}
+JSON
+  rc=0
+  bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
+  cat "$WORK/out"
+  [ "$rc" -eq 0 ]
+  grep -qiE 'not a valid RFC-1123 label' "$WORK/out"
+  grep -qi 'nothing to pin' "$WORK/out"
+  ! grep -q 'APPLY-HR' "$FAKE_CMDLOG"
+  grep -qF -- "STAMP" "$FAKE_CMDLOG"
   rm -rf "$WORK"
 }
 

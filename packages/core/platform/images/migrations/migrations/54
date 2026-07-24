@@ -189,9 +189,21 @@ list_kmts() {
 # objects are absent (a pool that never rendered under a bad name).
 pin_pool_objects() {
   cluster=$1; group=$2; ns=$3
-  pin_keep "machinedeployment.cluster.x-k8s.io" "kubernetes-${cluster}-${group}" "$ns"
-  pin_keep "machinehealthcheck.cluster.x-k8s.io" "kubernetes-${cluster}-${group}" "$ns"
-  pin_keep "workloadmonitor.cozystack.io" "kubernetes-${cluster}-${group}" "$ns"
+  base="kubernetes-${cluster}-${group}"
+  # The pool's objects only ever existed under this composed name, and the
+  # apiserver only accepts DNS-1123 subdomain names -- so a composed name that
+  # is not one (a group key with a slash, space, underscore, uppercase...)
+  # provably never had an object applied under it. Skip without issuing any
+  # read: there is nothing to pin, and kubectl rejects some malformed names
+  # client-side (e.g. containing '/'), which would read as a failure here and
+  # deadlock the run over a pool that cannot exist.
+  if ! printf '%s' "$base" | grep -qE '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'; then
+    echo "    '$base' is not a valid object name, so no object can exist under it; nothing to pin"
+    return 0
+  fi
+  pin_keep "machinedeployment.cluster.x-k8s.io" "$base" "$ns"
+  pin_keep "machinehealthcheck.cluster.x-k8s.io" "$base" "$ns"
+  pin_keep "workloadmonitor.cozystack.io" "$base" "$ns"
   kmts=$(list_kmts "$ns")
   for kmt in $(printf '%s\n' "$kmts" |
                grep -E "^kubernetes-${cluster}-${group}-[0-9a-f]{6}$" || true); do
@@ -262,9 +274,11 @@ kubectl get helmrelease --all-namespaces \
       # rejects it, and under set -e the script exits 1 — deadlocking the
       # platform pre-upgrade hook for EVERY tenant, exactly the failure the
       # overflow branch below was built to avoid. Route it through the same
-      # warn + pin + skip path (a pool that never rendered under a bad name has
-      # no objects, so pin_pool_objects is a safe no-op — the warning is the
-      # point).
+      # warn + pin + skip path. pin_pool_objects pins whatever can actually
+      # exist: a key that is label-invalid but still a valid object name (e.g.
+      # dotted) may have live objects and gets pinned; one that is not even a
+      # valid object name provably has none and is skipped without a read --
+      # either way the warning is the point.
       if ! printf '%s' "$child_name" | grep -qE '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'; then
         echo "  WARNING: child release name '$child_name' (nodeGroup key '$group') is not a valid RFC-1123 label" >&2
         echo "  WARNING: pinning pool '$cluster'/'$group' objects with resource-policy=keep and skipping adoption" >&2
