@@ -7,10 +7,12 @@
 # this file tests the embedded shell script's BEHAVIOR: the rendered chart's Job
 # args are extracted and executed against a fake kubectl, because the script's
 # error classification cannot be asserted from the manifest. The contract under
-# test: NotFound on a read means "native pool or already gone" and is a no-op,
-# while a transient server error must fail the Job (set -e, retried by
-# backoffLimit) -- treating it as absent would skip the unpin, report success,
-# and leak the still-keep-annotated worker objects past the uninstall.
+# test: absence (--ignore-not-found success + empty output) and "present but
+# unannotated" are the same no-op, ANY read or list failure fails the Job
+# (set -e, retried by backoffLimit) whatever its message says -- treating a
+# failure as absent would skip the unpin, report success, and leak the still
+# keep-annotated worker objects past the uninstall -- and stderr warnings on
+# successful reads never contaminate the annotation value.
 #
 # Requires helm (present in the unit-tests CI toolchain; the same job installs
 # the helm-unittest plugin).
@@ -47,9 +49,9 @@ prep() {
   export PATH="$FAKEBIN:$PATH"
 }
 
-@test "unpin hook: NotFound objects are a no-op and the script succeeds (native pool preserved)" {
+@test "unpin hook: absent objects are a no-op and the script succeeds (native pool preserved)" {
   prep
-  export FAKE_MODE=notfound
+  export FAKE_MODE=absent
   rc=0
   sh "$WORK/unpin.sh" >"$WORK/out" 2>&1 || rc=$?
   cat "$WORK/out"
@@ -60,18 +62,64 @@ prep() {
 
 @test "unpin hook: a transient error reading an object fails the Job, not silently skipping the unpin" {
   prep
-  # kubectl exits 1 for NotFound and for a transient failure alike; if the
-  # script read a timeout as "absent" it would skip the unpin, succeed, and the
-  # uninstall would leave the keep-annotated MachineDeployment (and its worker
-  # VMs) running unmanaged in the tenant namespace. The KMT list query succeeds
-  # in this mode, so a failure proves the NAMED-get classification.
+  # With --ignore-not-found, absence is success+empty, so a non-zero get can
+  # only be a real failure; reading it as "absent" would skip the unpin,
+  # succeed, and the uninstall would leave the keep-annotated MachineDeployment
+  # (and its worker VMs) running unmanaged in the tenant namespace. The KMT
+  # list query succeeds in this mode, so a failure proves the NAMED-get path.
   export FAKE_MODE=error-named
   rc=0
   sh "$WORK/unpin.sh" >"$WORK/out" 2>&1 || rc=$?
   cat "$WORK/out"
   [ "$rc" -ne 0 ]
-  grep -q 'ERROR: reading' "$WORK/out"
+  grep -q 'request timed out' "$WORK/out"
   ! grep -q 'annotate' "$FAKE_CMDLOG"
+  rm -rf "$WORK"
+}
+
+@test "unpin hook: a read failure whose message contains 'not found' still fails the Job" {
+  prep
+  # A conversion-webhook outage fails a get with '... service
+  # "capi-webhook-service" not found'. That is a failure, not absence; a
+  # text-match on "not found" would classify it as absent and leak the pinned
+  # objects. Only --ignore-not-found's success+empty means absent.
+  export FAKE_MODE=error-named-notfoundish
+  rc=0
+  sh "$WORK/unpin.sh" >"$WORK/out" 2>&1 || rc=$?
+  cat "$WORK/out"
+  [ "$rc" -ne 0 ]
+  ! grep -q 'annotate' "$FAKE_CMDLOG"
+  rm -rf "$WORK"
+}
+
+@test "unpin hook: a failed KMT listing fails the Job, not reading as zero templates" {
+  prep
+  # The named objects read clean (unpinned) so a failure proves the LIST path:
+  # a listing failure masked as empty would skip every KMT unpin, succeed, and
+  # leak the keep-annotated templates past the uninstall.
+  export FAKE_MODE=unpinned FAKE_LIST_FAIL=1
+  rc=0
+  sh "$WORK/unpin.sh" >"$WORK/out" 2>&1 || rc=$?
+  cat "$WORK/out"
+  [ "$rc" -ne 0 ]
+  ! grep -q 'annotate' "$FAKE_CMDLOG"
+  unset FAKE_LIST_FAIL
+  rm -rf "$WORK"
+}
+
+@test "unpin hook: a kubectl warning on stderr does not fake a pinned state" {
+  prep
+  # kubectl warns on SUCCESSFUL reads (API deprecation -- deterministic for a
+  # deprecated GVK -- and client-side throttling). If the annotation read
+  # captured stderr into its value, an unannotated object would read as
+  # "pinned" and get a spurious annotate call.
+  export FAKE_MODE=unpinned FAKE_WARN_STDERR=1
+  rc=0
+  sh "$WORK/unpin.sh" >"$WORK/out" 2>&1 || rc=$?
+  cat "$WORK/out"
+  [ "$rc" -eq 0 ]
+  ! grep -q 'annotate' "$FAKE_CMDLOG"
+  unset FAKE_WARN_STDERR
   rm -rf "$WORK"
 }
 
