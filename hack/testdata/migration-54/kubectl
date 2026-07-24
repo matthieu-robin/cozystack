@@ -5,14 +5,24 @@
 #   FAKE_CHILD_HR path to write the child HelmRelease that `apply -f -` receives
 #   FAKE_CMDLOG   path to append a call log (APPLY-HR / STAMP / annotate / label)
 #   FAKE_GET_FAIL substring: any `get` whose args match it fails with a
-#                 transient (non-NotFound) server error, so the migration's
-#                 NotFound-vs-transient classification is exercised
-# Absent objects fail the way the real apiserver does -- "Error from server
-# (NotFound): ..." on stderr, exit 1 -- because the migration distinguishes
-# NotFound (skip) from transient errors (fail closed) by stderr content; a bare
-# exit 1 would read as a transient error and abort the run.
+#                 transient server error (message overridable via
+#                 FAKE_GET_FAIL_MSG, e.g. a conversion-webhook failure whose
+#                 text happens to contain "not found"), so the migration's
+#                 absence-vs-failure classification is exercised
+#   FAKE_WARN_STDERR when set, every successful get prints a deprecation
+#                 warning to stderr first, the way real kubectl does -- data
+#                 captured with 2>&1 would be contaminated by it
+# Absence honors --ignore-not-found the way real kubectl does: with the flag a
+# missing object is SUCCESS with empty output; without it, "Error from server
+# (NotFound)" on stderr and exit 1.
 log() { [ -n "${FAKE_CMDLOG:-}" ] && echo "$*" >> "$FAKE_CMDLOG"; return 0; }
 notfound() { echo "Error from server (NotFound): $1 not found" >&2; exit 1; }
+absent() {
+  case "$args" in
+    *--ignore-not-found*) exit 0 ;;
+  esac
+  notfound "$1"
+}
 verb=${1:-}
 shift 2>/dev/null || true
 args="$*"
@@ -21,8 +31,11 @@ case "$verb" in
     if [ -n "${FAKE_GET_FAIL:-}" ]; then
       case "$args" in
         *"${FAKE_GET_FAIL}"*)
-          echo "Error from server: etcdserver: request timed out" >&2; exit 1 ;;
+          echo "${FAKE_GET_FAIL_MSG:-Error from server: etcdserver: request timed out}" >&2; exit 1 ;;
       esac
+    fi
+    if [ -n "${FAKE_WARN_STDERR:-}" ]; then
+      echo "Warning: cluster.x-k8s.io/v1beta1 MachineDeployment is deprecated" >&2
     fi
     case "$args" in
       *helmrelease*--all-namespaces*)
@@ -48,13 +61,17 @@ case "$verb" in
     # adopt_one short-circuiting on absent).
     if [ -n "${FAKE_OBJS:-}" ] && [ -f "$FAKE_OBJS" ]; then
       line=$(grep -E "^${res}[[:space:]]+${name}([[:space:]]|$)" "$FAKE_OBJS" || true)
-      [ -z "$line" ] && notfound "${res} \"${name}\""       # absent
+      [ -z "$line" ] && absent "${res} \"${name}\""         # absent
+      rel=$(printf '%s\n' "$line" | awk '{print $3}')
       case "$args" in
-        *release-name*) printf '%s' "$(printf '%s\n' "$line" | awk '{print $3}')"; exit 0 ;;
+        *jsonpath*release-name*) printf '%s' "$rel"; exit 0 ;;
+        *" -o json"*)
+          printf '{"metadata":{"annotations":{"meta.helm.sh/release-name":"%s"}}}' "$rel"; exit 0 ;;
+        *" -o name"*)   printf '%s/%s\n' "$res" "$name"; exit 0 ;;
         *) exit 0 ;;                                        # existence check
       esac
     fi
-    notfound "${res} \"${name}\"" ;;    # default: absent
+    absent "${res} \"${name}\"" ;;      # default: absent
   apply)
     payload=$(cat)
     if printf '%s' "$payload" | grep -q 'HelmRelease'; then
