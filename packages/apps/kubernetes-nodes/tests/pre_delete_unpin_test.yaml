@@ -90,3 +90,10 @@ tests:
       - equal:
           path: spec.endpointSelector.matchLabels["cozystack.io/kubernetes-nodes-unpin"]
           value: kubernetes-nodes-myk8s-md0
+      # Assert the egress destination itself, not just that the policy selects the
+      # unpin pod: without this an egress regression could leave the uninstall hook
+      # unable to reach the apiserver to patch worker objects, and the test would
+      # still pass.
+      - equal:
+          path: spec.egress[0].toEntities[0]
+          value: kube-apiserver
