@@ -113,3 +113,60 @@ JSON
   ! grep -q 'APPLY-HR' "$FAKE_CMDLOG"
   rm -rf "$WORK"
 }
+
+@test "a non-object nodeGroup value is pinned and skipped, not crashed on (no upgrade deadlock)" {
+  prep
+  # kubectl edit on the parent HR bypasses the aggregated API's schema, so a group
+  # value can be stored as a non-object (here a string). The value-mapping jq then
+  # runs `"oops" | has(...)`, which aborts with exit 5 under set -e and deadlocks the
+  # platform pre-upgrade hook for every tenant. The normalize-to-null guard must warn,
+  # pin the (absent) pool objects, skip adoption, and let the run complete.
+  cat > "$FAKE_HR_LIST" <<'JSON'
+{"items":[{"metadata":{"namespace":"tenant-test","name":"kubernetes-test3"},"spec":{"values":{"nodeGroups":{"md0":"oops"}}}}]}
+JSON
+  rc=0
+  bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
+  cat "$WORK/out"
+  [ "$rc" -eq 0 ]
+  grep -qiE 'non-object value' "$WORK/out"
+  ! grep -q 'APPLY-HR' "$FAKE_CMDLOG"
+  rm -rf "$WORK"
+}
+
+@test "a non-object nodeGroups map is skipped per-cluster, not crashed on (no upgrade deadlock)" {
+  prep
+  # nodeGroups itself stored as a non-object (here an array). keys[] on an array
+  # yields indices, then .[$idx] fails with "Cannot index array with string", exiting
+  # 1 under set -e and deadlocking every tenant's pre-upgrade hook. The shape guard
+  # must warn and skip this cluster's pool adoption, letting the run complete.
+  cat > "$FAKE_HR_LIST" <<'JSON'
+{"items":[{"metadata":{"namespace":"tenant-test","name":"kubernetes-test3"},"spec":{"values":{"nodeGroups":["md0"]}}}]}
+JSON
+  rc=0
+  bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
+  cat "$WORK/out"
+  [ "$rc" -eq 0 ]
+  grep -qiE 'not an object' "$WORK/out"
+  ! grep -q 'APPLY-HR' "$FAKE_CMDLOG"
+  rm -rf "$WORK"
+}
+
+@test "a whitespace nodeGroup key reaches the RFC-1123 guard intact, not word-split into bogus pools" {
+  prep
+  # The old nodeGroups map key was never schema-constrained. An unquoted
+  # `for group in $(... keys[])` word-splits a key like 'my pool' into 'my' and
+  # 'pool' BEFORE the RFC-1123 guard, each fragment individually valid, fabricating
+  # two garbage child HelmReleases for a pool that never existed. Newline-safe
+  # iteration keeps the key intact so the guard rejects the space and pins + skips.
+  cat > "$FAKE_HR_LIST" <<'JSON'
+{"items":[{"metadata":{"namespace":"tenant-test","name":"kubernetes-test3"},"spec":{"values":{"nodeGroups":{"my pool":{"minReplicas":1}}}}}]}
+JSON
+  rc=0
+  bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
+  cat "$WORK/out"
+  [ "$rc" -eq 0 ]
+  grep -qiE 'not a valid RFC-1123 label' "$WORK/out"
+  # Neither 'my' nor 'pool' is ever applied as a child release.
+  ! grep -q 'APPLY-HR' "$FAKE_CMDLOG"
+  rm -rf "$WORK"
+}

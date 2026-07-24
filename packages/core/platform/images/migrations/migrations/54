@@ -148,15 +148,44 @@ kubectl get helmrelease --all-namespaces \
     echo "processing cluster '$cluster' (HelmRelease $name in $ns)"
 
     groups_json=$(printf '%s' "$values" | jq -c '.nodeGroups // {}')
+    # nodeGroups is map[string]NodeGroup, but the aggregated API's old schema never
+    # enforced that shape, so a hand-mangled parent HR (a kubectl edit bypasses the
+    # aggregated API's validation) can persist nodeGroups as a non-object: an array,
+    # string or number. Iterating that shape crashes jq under set -e (e.g. keys[] on
+    # an array yields indices, then .[$idx] fails with "Cannot index array with
+    # string") and, because this runs as the platform pre-upgrade hook, exits 1 and
+    # deadlocks the upgrade for EVERY tenant. Warn and skip this cluster's pool
+    # adoption instead. {} / null still fall through to the implicit md0 default.
+    groups_type=$(printf '%s' "$groups_json" | jq -r 'type')
+    if [ "$groups_type" != "object" ]; then
+      echo "  WARNING: nodeGroups of cluster '$cluster' is a $groups_type, not an object; skipping pool adoption for this cluster" >&2
+      continue
+    fi
     if [ "$(printf '%s' "$groups_json" | jq 'length')" -eq 0 ]; then
       echo "  nodeGroups empty; materialising implicit md0 default"
       groups_json=$(jq -cn --argjson d "$DEFAULT_MD0" '{md0: $d}')
     fi
 
-    for group in $(printf '%s' "$groups_json" | jq -r 'keys[]'); do
+    # Iterate keys newline-safely. An unquoted `for group in $(... keys[])` would
+    # word-split (and glob-expand) a key containing whitespace or a glob char, e.g.
+    # "my pool", exactly as reachable as the "My_Pool" case the RFC-1123 guard below
+    # was added for, into separate fragments, each individually RFC-1123 valid, so
+    # the guard never fires and bogus child releases get fabricated for a pool that
+    # never existed. `read` consumes whole lines and does not glob, so the intact key
+    # reaches the guard. A key with an embedded newline cannot round-trip line
+    # iteration, but each fragment then fails the RFC-1123 regex as one token, so
+    # nothing hostile survives. Fail-closed exit semantics are preserved: a non-zero
+    # exit inside the loop (set -e) propagates out through pipefail exactly as the
+    # enclosing per-cluster while pipeline already relies on.
+    printf '%s' "$groups_json" | jq -r 'keys[]' | while IFS= read -r group; do
       child_name="kubernetes-nodes-${cluster}-${group}"
       app_name="${cluster}-${group}"
-      grp=$(printf '%s' "$groups_json" | jq -c --arg g "$group" '.[$g]')
+      # Normalize the per-group value to an object or null: the same
+      # unconstrained-schema vector lets a group value be a non-object
+      # (string/number/array), on which the value-mapping jq below (`$grp | has(...)`)
+      # aborts under set -e. A non-object value becomes null and takes the warn + pin
+      # + skip path below, same as an invalid name.
+      grp=$(printf '%s' "$groups_json" | jq -c --arg g "$group" '.[$g] | if type == "object" then . else null end')
 
       # A HelmRelease metadata.name must be a valid RFC-1123 label. The old
       # nodeGroups map key was never schema-constrained (map[string]NodeGroup,
@@ -191,6 +220,17 @@ kubectl get helmrelease --all-namespaces \
         echo "  WARNING: child release name '$child_name' (${#child_name} chars) exceeds Helm's 53-char limit" >&2
         echo "  WARNING: pinning pool '$cluster'/'$group' objects with resource-policy=keep and skipping adoption" >&2
         echo "  WARNING: remedy: recreate the cluster with a shorter name (cluster+pool must fit in 36 chars)" >&2
+        pin_pool_objects "$cluster" "$group" "$ns"
+        continue
+      fi
+
+      # A non-object group value (normalized to null above) carries no pool
+      # configuration; pin any objects it may have rendered and skip adoption, the
+      # same warn + pin + skip contract as an invalid name. Without this the
+      # value-mapping jq below aborts under set -e and deadlocks the pre-upgrade
+      # hook for every tenant.
+      if [ "$grp" = "null" ]; then
+        echo "  WARNING: nodeGroup '$group' of cluster '$cluster' has a non-object value; pinning its objects with resource-policy=keep and skipping adoption" >&2
         pin_pool_objects "$cluster" "$group" "$ns"
         continue
       fi
