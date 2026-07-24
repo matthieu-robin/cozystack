@@ -157,9 +157,15 @@ spec:
               unpin "machinedeployment.cluster.x-k8s.io/${BASE}"
               unpin "machinehealthcheck.cluster.x-k8s.io/${BASE}"
               unpin "workloadmonitor.cozystack.io/${BASE}"
-              for kmt in $(kubectl -n "${NS}" get kubevirtmachinetemplate.infrastructure.cluster.x-k8s.io \
-                             -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null |
-                           grep -E "^${BASE}-[0-9a-f]{6}$" || true); do
+              # Discover this pool's hash-suffixed KMTs. The list is NOT wrapped in
+              # `2>/dev/null || true`: an API/RBAC failure here must fail the Job
+              # (set -e), not masquerade as an empty result and silently leak the
+              # keep-annotated templates on uninstall, the same "Failures are NOT
+              # swallowed" contract unpin() above holds. A successful-but-empty
+              # listing is fine: grep then matches nothing and the loop is a no-op.
+              kmts=$(kubectl -n "${NS}" get kubevirtmachinetemplate.infrastructure.cluster.x-k8s.io \
+                       -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+              for kmt in $(printf '%s\n' "${kmts}" | grep -E "^${BASE}-[0-9a-f]{6}$" || true); do
                 unpin "kubevirtmachinetemplate.infrastructure.cluster.x-k8s.io/${kmt}"
               done
               echo "unpin done"
