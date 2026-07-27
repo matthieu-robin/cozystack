@@ -55,7 +55,7 @@ type ConfigSpec struct {
 	// Maximum time a Machine is allowed to spend reaching the Ready condition before it is remediated. Raise for slow first boots (Talos image fetch from factory.talos.dev or a busy storage class on the kubevirt-csi PVC populator).
 	// +kubebuilder:default:="10m"
 	NodeStartupTimeout string `json:"nodeStartupTimeout"`
-	// Kubernetes major.minor version the pool joins. Must match the parent cluster's version and satisfy the Talos<->Kubernetes support matrix against `talos.version`.
+	// Kubernetes major.minor version the pool joins. Must not be ahead of the parent cluster's minor (workers may not lead the apiserver); it may lag behind during a rolling upgrade -- bump the parent Kubernetes CR first, then each pool -- and must satisfy the Talos<->Kubernetes support matrix against `talos.version`.
 	// +kubebuilder:default:="v1.35"
 	Version Version `json:"version"`
 	// Talos worker image configuration. Keep in sync with the parent cluster's `talos`.
