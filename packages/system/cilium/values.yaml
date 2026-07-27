@@ -23,8 +23,8 @@ cilium:
     mode: "kubernetes"
   image:
     repository: ghcr.io/cozystack/cozystack/cilium
-    tag: v1.5.0
-    digest: "sha256:94dc74c9301f0da5695c80e77b77ee0486ad0086b5be60a94136a2cafd410b73"
+    tag: v1.6.0
+    digest: "sha256:136a7dfff4d6adcd448424c2354144160028a8e96eb6558b917fd3ee6d7b39fe"
   envoy:
     enabled: true
     # Upstream default is {} — no requests/limits. The embedded envoy DaemonSet
@@ -40,6 +40,20 @@ cilium:
         memory: 1Gi
   gatewayAPI:
     enabled: true
+    # Upstream default is false — Envoy then advertises no ALPN protocols on
+    # TLS-terminating Gateway listeners, and browsers (which negotiate HTTP/2
+    # exclusively through TLS ALPN "h2") silently fall back to HTTP/1.1 on
+    # every request. ingress-nginx, which the Gateway API path replaces,
+    # advertised h2 out of the box, so false here is a client-visible
+    # regression, not a neutral default. With true, ALPN offers h2 then
+    # http/1.1 — clients without HTTP/2 keep negotiating http/1.1 unchanged.
+    # This only affects the client↔gateway hop: gateway↔backend stays
+    # HTTP/1.1 unless a Service opts in per GEP-1911 via appProtocol
+    # kubernetes.io/h2c (enableAlpn also switches that support on; no
+    # cozystack-shipped Service declares such a value today).
+    # Platform-managed clusters can flip this through the platform chart's
+    # gateway.http2 value, which overrides this default either way.
+    enableAlpn: true
   rollOutCiliumPods: true
   operator:
     rollOutPods: true
