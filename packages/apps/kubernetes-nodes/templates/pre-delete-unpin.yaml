@@ -141,15 +141,22 @@ spec:
               NS="{{ .Release.Namespace }}"
               BASE="{{ $base }}"
               echo "removing helm.sh/resource-policy from adopted worker objects for ${BASE}"
-              # unpin <resource> — remove the keep annotation only if present, so a
-              # natively-created pool (no annotation) is a no-op while a real
-              # annotate failure (RBAC/apiserver) propagates: set -e fails the Job,
-              # backoffLimit/activeDeadlineSeconds bound the retries, and the failed
-              # Job keeps its logs. Failures are NOT swallowed.
+              # unpin <resource> — remove the keep annotation only if present.
+              # --ignore-not-found folds absence (object already gone) into the
+              # same empty-output no-op branch as "present but unannotated" (a
+              # natively-created pool) — exactly the semantics this hook wants.
+              # A non-zero exit can then only be a real failure (RBAC/apiserver/
+              # conversion webhook), which set -e turns into a failed Job:
+              # backoffLimit/activeDeadlineSeconds bound the retries and the
+              # failed Job keeps its logs. Failures are NOT swallowed — a
+              # failure read as "absent" would skip the unpin, report success,
+              # and leak the keep-annotated objects (and their VMs) past the
+              # uninstall. stderr stays on the Job log, never in $pol: kubectl
+              # warns on successful reads (API deprecation, throttling), and a
+              # captured warning would fake a "pinned" state.
               unpin() {
                 r=$1
-                kubectl -n "${NS}" get "${r}" >/dev/null 2>&1 || return 0
-                pol=$(kubectl -n "${NS}" get "${r}" \
+                pol=$(kubectl -n "${NS}" get "${r}" --ignore-not-found \
                   -o jsonpath='{.metadata.annotations.helm\.sh/resource-policy}')
                 [ -n "${pol}" ] || return 0
                 kubectl -n "${NS}" annotate "${r}" "helm.sh/resource-policy-"

@@ -77,7 +77,7 @@ nodeStartupTimeout: "10m"
 ## @value v1.32
 ## @value v1.31
 
-## @param {Version} version - Kubernetes major.minor version the pool joins. Must match the parent cluster's version and satisfy the Talos<->Kubernetes support matrix against `talos.version`.
+## @param {Version} version - Kubernetes major.minor version the pool joins. Must not be ahead of the parent cluster's minor (workers may not lead the apiserver); it may lag behind during a rolling upgrade -- bump the parent Kubernetes CR first, then each pool -- and must satisfy the Talos<->Kubernetes support matrix against `talos.version`.
 version: "v1.35"
 
 ##

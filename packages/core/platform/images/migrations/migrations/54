@@ -53,7 +53,15 @@
 # Idempotent: re-running skips child HRs that already exist and objects already
 # adopted. Strict: any failed create/annotate exits 1 so run-migrations.sh
 # leaves CURRENT_VERSION at 54 and retries on the next upgrade -- best-effort is
-# unsafe because a pool left un-pinned is pruned by the parent upgrade.
+# unsafe because a pool left un-pinned is pruned by the parent upgrade. The
+# same contract governs every read whose absence gates a pin or adopt: absence
+# is detected with --ignore-not-found (success + empty output), so a non-zero
+# read exit can only be a real failure and exits 1 rather than masquerade as
+# absence, because "absent" here means "do not pin", and an un-pinned live
+# pool is destroyed. stderr is never captured into data (kubectl warns on
+# successful reads) and never text-matched for absence (transient failures can
+# contain "not found" too); the child-HR existence check is the one
+# deliberately tolerant read, annotated inline.
 #
 # NOT auto-reversible: downgrading the platform re-renders the OLD kubernetes
 # chart, whose manifest still lists the worker objects now annotated
@@ -80,12 +88,27 @@ DEFAULT_MD0='{"minReplicas":0,"maxReplicas":10,"instanceType":"u1.medium","diskS
 # adopt_one <resource> <object-name> <namespace> <new-release> <expected-old-release>
 adopt_one() {
   res=$1; obj=$2; ns=$3; new_rel=$4; old_rel=$5
-  if ! kubectl get "$res" "$obj" -n "$ns" >/dev/null 2>&1; then
+  # One read serves both the existence check and the owner-annotation fetch.
+  # --ignore-not-found makes absence a SUCCESS with empty output, so a non-zero
+  # exit can only be a real failure (timeout, 429, RBAC, conversion-webhook
+  # outage -- all plausible while the platform is mid-upgrade) and exits 1, so
+  # run-migrations.sh leaves CURRENT_VERSION at 54 and retries on the next
+  # upgrade. Treating a failure as "absent" would skip the keep pin, let the
+  # migration complete and stamp, and the parent's control-plane-only re-render
+  # would then prune the live pool. Do NOT classify by stderr text ("not found"
+  # also appears in transient conversion-webhook failures), and do NOT capture
+  # stderr into data: kubectl warns on SUCCESSFUL reads (API deprecation,
+  # client-side throttling), and a warning glued onto the owner annotation
+  # would trip the foreign-owner refusal below on every tenant, deterministically.
+  if ! out=$(kubectl get "$res" "$obj" -n "$ns" -o json --ignore-not-found); then
+    echo "    ERROR: reading $res/$obj in $ns failed" >&2
+    return 1
+  fi
+  if [ -z "$out" ]; then
     echo "    $res/$obj absent in $ns, skipping"
     return 0
   fi
-  cur=$(kubectl get "$res" "$obj" -n "$ns" \
-    -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}' 2>/dev/null || true)
+  cur=$(printf '%s' "$out" | jq -r '.metadata.annotations["meta.helm.sh/release-name"] // ""')
   if [ "$cur" = "$new_rel" ]; then
     echo "    $res/$obj already adopted by $new_rel"
     return 0
@@ -95,9 +118,15 @@ adopt_one() {
     return 1
   fi
   echo "    adopting $res/$obj -> $new_rel"
+  # release-namespace is normally already present (Helm stamped it when the
+  # parent applied the object, and the child release lives in the same
+  # namespace), but an object whose Helm annotations were stripped out-of-band
+  # still passes the empty-cur branch above -- set it alongside release-name so
+  # such an object cannot fail the child's ownership validation.
   kubectl annotate "$res" "$obj" -n "$ns" \
     helm.sh/resource-policy=keep \
     meta.helm.sh/release-name="$new_rel" \
+    meta.helm.sh/release-namespace="$ns" \
     --overwrite
   kubectl label "$res" "$obj" -n "$ns" \
     app.kubernetes.io/managed-by=Helm --overwrite
@@ -109,25 +138,74 @@ adopt_one() {
 # unmanaged, until the operator gives the cluster a shorter name.
 pin_keep() {
   res=$1; obj=$2; ns=$3
-  if kubectl get "$res" "$obj" -n "$ns" >/dev/null 2>&1; then
-    echo "    pinning $res/$obj with resource-policy=keep"
-    kubectl annotate "$res" "$obj" -n "$ns" helm.sh/resource-policy=keep --overwrite
+  # Same absence-vs-failure split as adopt_one (--ignore-not-found: absence is
+  # success + empty output): a read failure treated as "absent" would leave a
+  # live pool un-pinned for the parent's prune, so it exits 1 and the migration
+  # retries on the next upgrade.
+  if ! out=$(kubectl get "$res" "$obj" -n "$ns" -o name --ignore-not-found); then
+    echo "    ERROR: reading $res/$obj in $ns failed" >&2
+    return 1
   fi
+  [ -z "$out" ] && return 0
+  echo "    pinning $res/$obj with resource-policy=keep"
+  kubectl annotate "$res" "$obj" -n "$ns" helm.sh/resource-policy=keep --overwrite
+}
+
+# list_kmts <namespace> -- newline-separated names of every
+# KubevirtMachineTemplate in the namespace. Fail-closed: a listing failure must
+# NOT read as "no templates" (the caller would adopt/pin zero KMTs, the
+# migration would complete and stamp, and the parent upgrade would prune a
+# preserved older-revision KMT that an in-flight MachineSet still references --
+# permanently, since the child chart only re-emits KMTs already annotated with
+# its own release name). `for kmt in $(...)` discards the substitution's exit
+# status even under set -e, so callers capture into a variable first (the
+# assignment's failure IS seen by set -e) and grep afterwards. A missing CRD
+# (migration-47 precedent) means no pool can exist -> empty; that is the ONE
+# classification stderr is needed for, so stderr goes to a temp file -- never
+# into the data variable, which kubectl warnings on successful reads would
+# contaminate -- and only the two deterministic RESTMapper/discovery messages
+# match; a transient failure whose text merely contains "not found" does not.
+list_kmts() {
+  ns=$1
+  errf=$(mktemp)
+  if ! out=$(kubectl get kubevirtmachinetemplate.infrastructure.cluster.x-k8s.io -n "$ns" \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>"$errf"); then
+    err=$(cat "$errf"); rm -f "$errf"
+    case "$err" in
+      *"the server doesn't have a resource type"*|*"no matches for kind"*) return 0 ;;
+    esac
+    echo "  ERROR: listing KubevirtMachineTemplates in $ns failed: $err" >&2
+    return 1
+  fi
+  rm -f "$errf"
+  printf '%s' "$out"
 }
 
 # pin_pool_objects <cluster> <group> <namespace> -- pin every worker object of a
 # pool we cannot adopt (name overflow, or a name that is not a valid HelmRelease
 # metadata.name) so the parent's control-plane-only re-render cannot prune them.
 # The pool keeps running unmanaged until the operator recreates it with a legal
-# name. Existence-checked inside pin_keep, so it is a safe no-op when the objects
-# are absent (a pool that never rendered under a bad name).
+# name. Absence is tolerated inside pin_keep, so it is a safe no-op when the
+# objects are absent (a pool that never rendered under a bad name).
 pin_pool_objects() {
   cluster=$1; group=$2; ns=$3
-  pin_keep "machinedeployment.cluster.x-k8s.io" "kubernetes-${cluster}-${group}" "$ns"
-  pin_keep "machinehealthcheck.cluster.x-k8s.io" "kubernetes-${cluster}-${group}" "$ns"
-  pin_keep "workloadmonitor.cozystack.io" "kubernetes-${cluster}-${group}" "$ns"
-  for kmt in $(kubectl get kubevirtmachinetemplate.infrastructure.cluster.x-k8s.io -n "$ns" \
-                 -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null |
+  base="kubernetes-${cluster}-${group}"
+  # The pool's objects only ever existed under this composed name, and the
+  # apiserver only accepts DNS-1123 subdomain names -- so a composed name that
+  # is not one (a group key with a slash, space, underscore, uppercase...)
+  # provably never had an object applied under it. Skip without issuing any
+  # read: there is nothing to pin, and kubectl rejects some malformed names
+  # client-side (e.g. containing '/'), which would read as a failure here and
+  # deadlock the run over a pool that cannot exist.
+  if ! printf '%s' "$base" | grep -qE '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'; then
+    echo "    '$base' is not a valid object name, so no object can exist under it; nothing to pin"
+    return 0
+  fi
+  pin_keep "machinedeployment.cluster.x-k8s.io" "$base" "$ns"
+  pin_keep "machinehealthcheck.cluster.x-k8s.io" "$base" "$ns"
+  pin_keep "workloadmonitor.cozystack.io" "$base" "$ns"
+  kmts=$(list_kmts "$ns")
+  for kmt in $(printf '%s\n' "$kmts" |
                grep -E "^kubernetes-${cluster}-${group}-[0-9a-f]{6}$" || true); do
     pin_keep "kubevirtmachinetemplate.infrastructure.cluster.x-k8s.io" "$kmt" "$ns"
   done
@@ -196,9 +274,11 @@ kubectl get helmrelease --all-namespaces \
       # rejects it, and under set -e the script exits 1 — deadlocking the
       # platform pre-upgrade hook for EVERY tenant, exactly the failure the
       # overflow branch below was built to avoid. Route it through the same
-      # warn + pin + skip path (a pool that never rendered under a bad name has
-      # no objects, so pin_pool_objects is a safe no-op — the warning is the
-      # point).
+      # warn + pin + skip path. pin_pool_objects pins whatever can actually
+      # exist: a key that is label-invalid but still a valid object name (e.g.
+      # dotted) may have live objects and gets pinned; one that is not even a
+      # valid object name provably has none and is skipped without a read --
+      # either way the warning is the point.
       if ! printf '%s' "$child_name" | grep -qE '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'; then
         echo "  WARNING: child release name '$child_name' (nodeGroup key '$group') is not a valid RFC-1123 label" >&2
         echo "  WARNING: pinning pool '$cluster'/'$group' objects with resource-policy=keep and skipping adoption" >&2
@@ -277,13 +357,18 @@ kubectl get helmrelease --all-namespaces \
       # Anchor on that suffix so pool 'md0' does not also match a sibling pool
       # 'md0-large-<hash>' (which would mis-adopt it and deadlock the migration).
       # Adopt every revision (current + any preserved older one still referenced
-      # by an in-flight MachineSet).
-      for kmt in $(kubectl get kubevirtmachinetemplate.infrastructure.cluster.x-k8s.io -n "$ns" \
-                     -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null |
+      # by an in-flight MachineSet). Capture-first via list_kmts (fail-closed);
+      # the || true covers only the empty-grep-match case.
+      kmts=$(list_kmts "$ns")
+      for kmt in $(printf '%s\n' "$kmts" |
                    grep -E "^kubernetes-${cluster}-${group}-[0-9a-f]{6}$" || true); do
         adopt_one "kubevirtmachinetemplate.infrastructure.cluster.x-k8s.io" "$kmt" "$ns" "$child_name" "kubernetes-${cluster}"
       done
 
+      # This existence check MAY stay fail-open (unlike the reads above): a
+      # transient error here routes into the create path, whose `kubectl apply`
+      # is idempotent for an HR this migration already created and itself fails
+      # closed if the apiserver is genuinely down. No silent-skip hazard.
       if kubectl get helmrelease "$child_name" -n "$ns" >/dev/null 2>&1; then
         echo "  child HelmRelease $child_name already exists, skipping create"
       else

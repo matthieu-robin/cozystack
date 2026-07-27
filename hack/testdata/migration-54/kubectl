@@ -4,22 +4,57 @@
 #   FAKE_HR_LIST  path to the `get helmrelease -o json` list fixture
 #   FAKE_CHILD_HR path to write the child HelmRelease that `apply -f -` receives
 #   FAKE_CMDLOG   path to append a call log (APPLY-HR / STAMP / annotate / label)
+#   FAKE_GET_FAIL substring: any `get` whose args match it fails with a
+#                 transient server error (message overridable via
+#                 FAKE_GET_FAIL_MSG, e.g. a conversion-webhook failure whose
+#                 text happens to contain "not found"), so the migration's
+#                 absence-vs-failure classification is exercised
+#   FAKE_WARN_STDERR when set, every successful get prints a deprecation
+#                 warning to stderr first, the way real kubectl does -- data
+#                 captured with 2>&1 would be contaminated by it
+# Absence honors --ignore-not-found the way real kubectl does: with the flag a
+# missing object is SUCCESS with empty output; without it, "Error from server
+# (NotFound)" on stderr and exit 1.
 log() { [ -n "${FAKE_CMDLOG:-}" ] && echo "$*" >> "$FAKE_CMDLOG"; return 0; }
+notfound() { echo "Error from server (NotFound): $1 not found" >&2; exit 1; }
+absent() {
+  case "$args" in
+    *--ignore-not-found*) exit 0 ;;
+  esac
+  notfound "$1"
+}
 verb=${1:-}
 shift 2>/dev/null || true
 args="$*"
 case "$verb" in
   get)
+    if [ -n "${FAKE_GET_FAIL:-}" ]; then
+      case "$args" in
+        *"${FAKE_GET_FAIL}"*)
+          echo "${FAKE_GET_FAIL_MSG:-Error from server: etcdserver: request timed out}" >&2; exit 1 ;;
+      esac
+    fi
+    if [ -n "${FAKE_WARN_STDERR:-}" ]; then
+      echo "Warning: cluster.x-k8s.io/v1beta1 MachineDeployment is deprecated" >&2
+    fi
     case "$args" in
       *helmrelease*--all-namespaces*)
         cat "$FAKE_HR_LIST"; exit 0 ;;
       *helmrelease*kubernetes-nodes-*)
-        exit 1 ;;                       # child HR absent -> script takes the create path
+        notfound "helmreleases.helm.toolkit.fluxcd.io" ;;  # child HR absent -> create path
     esac
     # tokenize: $1=resource, $2=object-name (or a flag for list queries)
     # shellcheck disable=SC2086
     set -- $args
     res=$1; name=$2
+    # Real kubectl rejects a name containing '/' client-side, before any API
+    # call, deterministically -- reproduce that so the migration provably never
+    # issues a read for a composed name that cannot exist.
+    case "$name" in
+      */*)
+        echo "error: there is no need to specify a resource type as a separate argument when passing arguments in resource/name form" >&2
+        exit 1 ;;
+    esac
     case "$res" in
       kubevirtmachinetemplate*)
         case "$name" in
@@ -34,13 +69,17 @@ case "$verb" in
     # adopt_one short-circuiting on absent).
     if [ -n "${FAKE_OBJS:-}" ] && [ -f "$FAKE_OBJS" ]; then
       line=$(grep -E "^${res}[[:space:]]+${name}([[:space:]]|$)" "$FAKE_OBJS" || true)
-      [ -z "$line" ] && exit 1                              # absent
+      [ -z "$line" ] && absent "${res} \"${name}\""         # absent
+      rel=$(printf '%s\n' "$line" | awk '{print $3}')
       case "$args" in
-        *release-name*) printf '%s' "$(printf '%s\n' "$line" | awk '{print $3}')"; exit 0 ;;
+        *jsonpath*release-name*) printf '%s' "$rel"; exit 0 ;;
+        *" -o json"*)
+          printf '{"metadata":{"annotations":{"meta.helm.sh/release-name":"%s"}}}' "$rel"; exit 0 ;;
+        *" -o name"*)   printf '%s/%s\n' "$res" "$name"; exit 0 ;;
         *) exit 0 ;;                                        # existence check
       esac
     fi
-    exit 1 ;;                           # default: absent
+    absent "${res} \"${name}\"" ;;      # default: absent
   apply)
     payload=$(cat)
     if printf '%s' "$payload" | grep -q 'HelmRelease'; then

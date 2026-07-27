@@ -286,9 +286,14 @@ spec:
         protocol: TCP
     {{- /* Initial render lists only the DNS SANs because the apiserver
            Service ClusterIP is not yet allocated when Helm executes the
-           template. The talos-reconcile main-phase Job re-patches certSANs
-           with the live ClusterIP once Kamaji emits the Service, and
-           Kamaji then re-issues the apiserver TLS cert to cover it. */}}
+           template. Since the worker split, the talos-reconcile Job that
+           re-patches certSANs with the live ClusterIP (after which Kamaji
+           re-issues the apiserver TLS cert) runs in each kubernetes-nodes
+           pool release, not in this chart: a cluster with at least one pool
+           gains the ClusterIP SAN once Kamaji emits the Service, while a
+           pool-less cluster keeps DNS SANs only. That is a best-effort
+           extra, not a dependency -- workers dial the apiserver by DNS name
+           via extraHostEntries, so nothing requires the IP SAN. */}}
     certSANs:
       - {{ printf "%s.%s.svc" .Release.Name .Release.Namespace }}
       - {{ printf "%s.%s.svc.%s" .Release.Name .Release.Namespace (include "kubernetes.tenantClusterDomain" .) }}
