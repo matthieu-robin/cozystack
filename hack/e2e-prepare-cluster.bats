@@ -96,13 +96,19 @@ EOF
 }
 
 @test "Boot QEMU VMs" {
+  # cache=unsafe drops guest flush pass-through on these ephemeral CI disks.
+  # Otherwise every management-etcd Raft-commit fsync propagates to the
+  # host-backed raw files, and under the concurrent image/CDI I/O storm etcd
+  # stalls for seconds, the apiserver returns context-deadline-exceeded, and
+  # operators lose their leader-election leases together. The VMs are recreated
+  # per run, so the durability we trade away here is never needed.
   for i in 1 2 3; do
     qemu-system-x86_64 -machine type=pc,accel=kvm -cpu host -smp 8 -m 24576 \
       -device virtio-net,netdev=net0,mac=52:54:00:12:34:5${i} \
       -netdev tap,id=net0,ifname=cozy-srv${i},script=no,downscript=no \
-      -drive file=srv${i}/system.img,if=virtio,format=raw \
-      -drive file=srv${i}/seed.img,if=virtio,format=raw \
-      -drive file=srv${i}/data.img,if=virtio,format=raw \
+      -drive file=srv${i}/system.img,if=virtio,format=raw,cache=unsafe \
+      -drive file=srv${i}/seed.img,if=virtio,format=raw,cache=unsafe \
+      -drive file=srv${i}/data.img,if=virtio,format=raw,cache=unsafe \
       -display none -daemonize -pidfile srv${i}/qemu.pid
   done
 
