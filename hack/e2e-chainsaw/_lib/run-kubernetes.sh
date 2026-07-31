@@ -21,12 +21,19 @@
 # This wrapper retries a small number of times against a curated allowlist
 # of transient server-side signatures. It does NOT swallow legitimate
 # timeouts (`--timeout=... expired`) or NotFound; those still surface.
+#
+# The capture guards the assignment with `|| _rc=$?`: the chainsaw scripts run
+# under `set -eu`, where a bare `_out=$(kubectl wait ...)` on a failing wait
+# aborts the WHOLE sourcing script right there -- before the retry loop, before
+# anything prints (stderr is captured into _out and dies with the shell). That
+# exact shape killed the kubernetes-latest suite silently the moment a wait
+# failed, with the transient-retry machinery never once reachable.
 kubectl_wait_retry() {
   local _attempts=3
   local _i _out _rc
   for _i in $(seq 1 "${_attempts}"); do
-    _out=$(kubectl wait "$@" 2>&1)
-    _rc=$?
+    _rc=0
+    _out=$(kubectl wait "$@" 2>&1) || _rc=$?
     if [ "${_rc}" = 0 ]; then
       printf '%s\n' "${_out}"
       return 0
