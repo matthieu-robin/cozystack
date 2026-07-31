@@ -401,6 +401,17 @@ EOF
   # Wait for all required deployments to be available (timeout after 4 minutes)
   kubectl_wait_retry deploy --timeout=4m --for=condition=available -n tenant-test kubernetes-${test_name} kubernetes-${test_name}-cluster-autoscaler kubernetes-${test_name}-kccm kubernetes-${test_name}-kcsi-controller
 
+  # Since the Phase 2 split the MachineDeployment is rendered by the CHILD
+  # kubernetes-nodes-<cluster>-md0 HelmRelease -- a separately-dispatched
+  # reconcile with its own 20-30s helm-controller latency (same figure as the
+  # KCP note above), not by the parent install that produced the deployments
+  # just waited on. A fast parent bringup therefore reaches this point BEFORE
+  # the child HR has applied anything, and `kubectl wait` on an absent object
+  # exits NotFound immediately instead of polling. Event-driven existence
+  # backstop first, same sanctioned pattern as the kamajicontrolplane loop
+  # above; the faster the parent, the more certain the race is lost without it.
+  timeout 3m sh -ec 'until kubectl get machinedeployment -n tenant-test kubernetes-'"${test_name}"'-md0; do sleep 2; done'
+
   # Wait for the machine deployment to scale to 2 replicas. Pre-Talos this
   # was effectively instant because KubeadmConfigTemplate had no async
   # dependencies and CAPI/CAPK could create Machine + KubevirtMachine
