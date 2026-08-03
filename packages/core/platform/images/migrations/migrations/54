@@ -225,6 +225,32 @@ pin_pool_objects() {
   done
 }
 
+# pin_cluster_pools <cluster> <namespace> -- pin every live worker pool of a
+# cluster whose nodeGroups we cannot introspect (stored as a non-object). We
+# cannot enumerate the declared pool keys, so discover the live pools from their
+# KubevirtMachineTemplates (named kubernetes-<cluster>-<group>-<6hex>): each
+# distinct <group> is pinned via pin_pool_objects, the same warn+pin+skip
+# contract every other unadoptable branch uses. Without this the parent's
+# control-plane-only re-render prunes the un-pinned worker VMs. Fail-closed: the
+# KMT listing goes through list_kmts, so a transient read failure aborts the run
+# (retried next upgrade) instead of masquerading as "no pools" and leaving live
+# workers un-pinned. Over-matching a sibling cluster's KMT (when one cluster name
+# is a dash-delimited prefix of another in the same namespace) only pins keep on
+# an object that is preserved anyway, so it is harmless; under-matching would
+# lose VMs, so discovery errs toward pinning.
+pin_cluster_pools() {
+  cluster=$1; ns=$2
+  kmts=$(list_kmts "$ns")
+  groups=$(printf '%s\n' "$kmts" |
+           grep -E "^kubernetes-${cluster}-.+-[0-9a-f]{6}$" |
+           sed -E "s/^kubernetes-${cluster}-(.+)-[0-9a-f]{6}$/\1/" |
+           sort -u || true)
+  for group in $groups; do
+    [ -n "$group" ] || continue
+    pin_pool_objects "$cluster" "$group" "$ns"
+  done
+}
+
 kubectl get helmrelease --all-namespaces \
   -l apps.cozystack.io/application.kind=Kubernetes -o json |
   jq -c '.items[] | {ns: .metadata.namespace, name: .metadata.name, values: (.spec.values // {})}' |
@@ -247,10 +273,18 @@ kubectl get helmrelease --all-namespaces \
     # an array yields indices, then .[$idx] fails with "Cannot index array with
     # string") and, because this runs as the platform pre-upgrade hook, exits 1 and
     # deadlocks the upgrade for EVERY tenant. Warn and skip this cluster's pool
-    # adoption instead. {} / null still fall through to the implicit md0 default.
+    # adoption instead -- but first pin its live worker pools with
+    # resource-policy=keep (discovered from their KMTs, since the declared keys
+    # are unreadable): the objects were rendered by an earlier good revision and
+    # are still live, and skipping without pinning would let the parent's
+    # control-plane-only re-render prune the tenant's worker VMs, the exact
+    # data-loss every sibling skip branch (invalid name, overflow, per-group
+    # non-object) pins to avoid. {} / null still fall through to the implicit md0
+    # default.
     groups_type=$(printf '%s' "$groups_json" | jq -r 'type')
     if [ "$groups_type" != "object" ]; then
-      echo "  WARNING: nodeGroups of cluster '$cluster' is a $groups_type, not an object; skipping pool adoption for this cluster" >&2
+      echo "  WARNING: nodeGroups of cluster '$cluster' is a $groups_type, not an object; pinning its live worker pools with resource-policy=keep and skipping adoption" >&2
+      pin_cluster_pools "$cluster" "$ns"
       continue
     fi
     if [ "$(printf '%s' "$groups_json" | jq 'length')" -eq 0 ]; then

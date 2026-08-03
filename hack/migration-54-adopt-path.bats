@@ -170,6 +170,45 @@ JSON
   rm -rf "$WORK"
 }
 
+@test "a non-object nodeGroups map still pins the cluster's live worker pools before skipping (no prune)" {
+  prep
+  # nodeGroups mangled out-of-band to a non-object (array), but the cluster still
+  # has live worker objects from its last good render. The declared pool keys are
+  # unreadable, so the migration discovers the live pools from their KMTs and pins
+  # every worker object with resource-policy=keep -- otherwise the parent's
+  # control-plane-only re-render prunes the un-pinned VMs. No child HR is created
+  # (adoption is skipped), but the run completes and stamps. Two pools (md0, md1)
+  # prove discovery is not limited to the implicit md0.
+  cat > "$FAKE_HR_LIST" <<'JSON'
+{"items":[{"metadata":{"namespace":"tenant-test","name":"kubernetes-test3"},"spec":{"values":{"nodeGroups":["md0"]}}}]}
+JSON
+  cat > "$FAKE_OBJS" <<'OBJS'
+machinedeployment.cluster.x-k8s.io kubernetes-test3-md0 kubernetes-test3
+machinehealthcheck.cluster.x-k8s.io kubernetes-test3-md0 kubernetes-test3
+workloadmonitor.cozystack.io kubernetes-test3-md0 kubernetes-test3
+kubevirtmachinetemplate.infrastructure.cluster.x-k8s.io kubernetes-test3-md0-abc123 kubernetes-test3
+machinedeployment.cluster.x-k8s.io kubernetes-test3-md1 kubernetes-test3
+kubevirtmachinetemplate.infrastructure.cluster.x-k8s.io kubernetes-test3-md1-def456 kubernetes-test3
+OBJS
+  FAKE_KMT_NAMES=$(printf '%s\n%s' kubernetes-test3-md0-abc123 kubernetes-test3-md1-def456)
+  export FAKE_KMT_NAMES
+  rc=0
+  bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
+  cat "$WORK/out"
+  [ "$rc" -eq 0 ]
+  grep -qiE 'not an object' "$WORK/out"
+  # Both discovered pools pinned with keep, no ownership transfer (no release-name).
+  grep -qE 'annotate machinedeployment.* kubernetes-test3-md0 .*resource-policy=keep' "$FAKE_CMDLOG"
+  grep -qE 'annotate kubevirtmachinetemplate.* kubernetes-test3-md0-abc123 .*resource-policy=keep' "$FAKE_CMDLOG"
+  grep -qE 'annotate machinedeployment.* kubernetes-test3-md1 .*resource-policy=keep' "$FAKE_CMDLOG"
+  grep -qE 'annotate kubevirtmachinetemplate.* kubernetes-test3-md1-def456 .*resource-policy=keep' "$FAKE_CMDLOG"
+  ! grep -qE 'meta.helm.sh/release-name' "$FAKE_CMDLOG"
+  # Adoption skipped, run completes.
+  ! grep -q 'APPLY-HR' "$FAKE_CMDLOG"
+  grep -qF -- "STAMP" "$FAKE_CMDLOG"
+  rm -rf "$WORK"
+}
+
 @test "an absent worker object is skipped and the run still completes and stamps" {
   prep
   # No FAKE_OBJS: every named get is absent -- under --ignore-not-found that is
