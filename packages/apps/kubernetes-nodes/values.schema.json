@@ -214,7 +214,7 @@
       "default": {},
       "properties": {
         "kubectl": {
-          "description": "Image used by the talos-reconcile Job (kubectl). Empty falls back to images/kubectl.tag.",
+          "description": "Image used by the talos-reconcile and pre-delete unpin Jobs (kubectl). Empty falls back to images/kubectl.tag.",
           "type": "string",
           "default": ""
         }

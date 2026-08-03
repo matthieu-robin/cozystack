@@ -72,8 +72,8 @@ the parent cluster `kubernetes-<cluster>` in the same namespace, plus a
 
 ### Images
 
-| Name             | Description                                                                              | Type     | Value |
-| ---------------- | ---------------------------------------------------------------------------------------- | -------- | ----- |
-| `images`         | Optional image overrides for air-gapped or rate-limited registries.                      | `object` | `{}`  |
-| `images.kubectl` | Image used by the talos-reconcile Job (kubectl). Empty falls back to images/kubectl.tag. | `string` | `""`  |
+| Name             | Description                                                                                                    | Type     | Value |
+| ---------------- | -------------------------------------------------------------------------------------------------------------- | -------- | ----- |
+| `images`         | Optional image overrides for air-gapped or rate-limited registries.                                            | `object` | `{}`  |
+| `images.kubectl` | Image used by the talos-reconcile and pre-delete unpin Jobs (kubectl). Empty falls back to images/kubectl.tag. | `string` | `""`  |
 

@@ -72,7 +72,7 @@ type GPU struct {
 }
 
 type Images struct {
-	// Image used by the talos-reconcile Job (kubectl). Empty falls back to images/kubectl.tag.
+	// Image used by the talos-reconcile and pre-delete unpin Jobs (kubectl). Empty falls back to images/kubectl.tag.
 	// +kubebuilder:default:=""
 	Kubectl string `json:"kubectl,omitempty"`
 }
