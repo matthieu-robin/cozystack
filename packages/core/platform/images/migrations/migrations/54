@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Migration 54 --> 55
 # Phase 2 kubernetes chart split: adopt the worker node pools that the
 # monolithic kubernetes chart used to render into per-pool kubernetes-nodes
