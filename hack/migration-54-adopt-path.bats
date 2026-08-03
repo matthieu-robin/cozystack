@@ -82,17 +82,32 @@ OBJS
   rm -rf "$WORK"
 }
 
-@test "adopt_one refuses an object owned by an unexpected release and fails the run closed" {
+@test "adopt_one skips an object owned by an unexpected release without deadlocking the fleet" {
   prep
+  # A worker object whose meta.helm.sh/release-name was hand-edited to a third
+  # release (reachable via `kubectl annotate` on the tenant namespace) must NOT
+  # abort the whole pre-upgrade hook: exiting 1 under set -e would deadlock the
+  # platform upgrade for EVERY tenant on one tenant's corrupted annotation, the
+  # same fleet-wide deadlock the non-object / overflow / invalid-name branches
+  # were reshaped to avoid. A foreign owner means the parent release does not own
+  # the object, so its control-plane-only re-render will not prune it; refuse to
+  # adopt THIS object, warn, and let the run complete and stamp. The sibling
+  # parent-owned objects in the same pool still adopt normally.
   cat > "$FAKE_OBJS" <<'OBJS'
 machinedeployment.cluster.x-k8s.io kubernetes-test3-md0 some-other-release
+machinehealthcheck.cluster.x-k8s.io kubernetes-test3-md0 kubernetes-test3
+workloadmonitor.cozystack.io kubernetes-test3-md0 kubernetes-test3
 OBJS
   rc=0
   bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
   cat "$WORK/out"
-  # Foreign owner -> refuse -> non-zero exit (fail closed, retried next upgrade).
-  [ "$rc" -ne 0 ]
-  grep -qi 'refusing' "$WORK/out"
+  [ "$rc" -eq 0 ]
+  grep -qiE 'owned by unexpected release' "$WORK/out"
+  # The foreign-owned MD is never re-annotated onto the child release...
+  ! grep -qE 'annotate machinedeployment.* meta.helm.sh/release-name=kubernetes-nodes-test3-md0' "$FAKE_CMDLOG"
+  # ...but the sibling parent-owned MHC still adopts, and the run stamps.
+  grep -qE 'annotate machinehealthcheck.* meta.helm.sh/release-name=kubernetes-nodes-test3-md0' "$FAKE_CMDLOG"
+  grep -qF -- "STAMP" "$FAKE_CMDLOG"
   rm -rf "$WORK"
 }
 

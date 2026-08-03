@@ -114,8 +114,22 @@ adopt_one() {
     return 0
   fi
   if [ -n "$cur" ] && [ "$cur" != "$old_rel" ]; then
-    echo "    $res/$obj owned by unexpected release '$cur' (expected '$old_rel'); refusing" >&2
-    return 1
+    # A foreign owner is a hostile stored shape, same class as a non-object
+    # nodeGroups or an RFC-1123-invalid key: reachable out-of-band via
+    # `kubectl annotate <res> <name> meta.helm.sh/release-name=<other>` on the
+    # tenant namespace. Do NOT exit 1 here -- under set -e that aborts the whole
+    # per-cluster pipeline, run-migrations.sh leaves CURRENT_VERSION unstamped,
+    # and one tenant's corrupted annotation deadlocks the platform upgrade for
+    # EVERY tenant with no path out. Refuse to adopt (rewriting a foreign
+    # release-name could corrupt that other release), but scope the blast radius
+    # to this one object: warn and skip. A foreign owner also means the parent
+    # kubernetes-<cluster> release does not own the object, so its
+    # control-plane-only re-render will not prune it -- skipping is prune-safe.
+    # The operator re-annotates it back to the parent (see the rollback recipe
+    # in the header) and the next upgrade adopts it.
+    echo "    WARNING: $res/$obj owned by unexpected release '$cur' (expected '$old_rel'); skipping adoption of this object" >&2
+    echo "    WARNING: remedy: re-annotate meta.helm.sh/release-name=$old_rel on $res/$obj, then re-run the upgrade" >&2
+    return 0
   fi
   echo "    adopting $res/$obj -> $new_rel"
   # release-namespace is normally already present (Helm stamped it when the
