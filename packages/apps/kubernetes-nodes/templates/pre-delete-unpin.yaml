@@ -164,14 +164,29 @@ spec:
               unpin "machinedeployment.cluster.x-k8s.io/${BASE}"
               unpin "machinehealthcheck.cluster.x-k8s.io/${BASE}"
               unpin "workloadmonitor.cozystack.io/${BASE}"
-              # Discover this pool's hash-suffixed KMTs. The list is NOT wrapped in
-              # `2>/dev/null || true`: an API/RBAC failure here must fail the Job
-              # (set -e), not masquerade as an empty result and silently leak the
-              # keep-annotated templates on uninstall, the same "Failures are NOT
-              # swallowed" contract unpin() above holds. A successful-but-empty
-              # listing is fine: grep then matches nothing and the loop is a no-op.
-              kmts=$(kubectl -n "${NS}" get kubevirtmachinetemplate.infrastructure.cluster.x-k8s.io \
-                       -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+              # Discover this pool's hash-suffixed KMTs. An API/RBAC failure here
+              # must fail the Job (set -e), not masquerade as an empty result and
+              # silently leak the keep-annotated templates on uninstall, the same
+              # "Failures are NOT swallowed" contract unpin() above holds. The one
+              # tolerated failure is a missing KubevirtMachineTemplate CRD: during a
+              # management-cluster CAPI teardown, or an already-Terminating
+              # namespace, the CRD can be gone, and there is then provably nothing
+              # to unpin -- failing would wedge the HR finalizer (backoffLimit
+              # exhausted) on a resource type that no longer exists. Distinguish it
+              # by kubectl's two deterministic RESTMapper messages (mirrors
+              # migration 54 list_kmts), never by a message that merely contains
+              # "not found". stderr is folded into the captured output only because
+              # the strict <BASE>-<6hex> grep below cannot match a kubectl warning
+              # line, so a success-path deprecation warning is harmlessly filtered.
+              if ! kmts=$(kubectl -n "${NS}" get kubevirtmachinetemplate.infrastructure.cluster.x-k8s.io \
+                       -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>&1); then
+                case "${kmts}" in
+                  *"the server doesn't have a resource type"*|*"no matches for kind"*)
+                    echo "KubevirtMachineTemplate CRD absent; nothing to unpin"; kmts="" ;;
+                  *)
+                    echo "ERROR: listing KubevirtMachineTemplates failed: ${kmts}" >&2; exit 1 ;;
+                esac
+              fi
               for kmt in $(printf '%s\n' "${kmts}" | grep -E "^${BASE}-[0-9a-f]{6}$" || true); do
                 unpin "kubevirtmachinetemplate.infrastructure.cluster.x-k8s.io/${kmt}"
               done

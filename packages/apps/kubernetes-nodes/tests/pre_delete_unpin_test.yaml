@@ -46,6 +46,23 @@ tests:
           path: spec.template.spec.serviceAccountName
           value: kubernetes-nodes-myk8s-md0-unpin
 
+  - it: tolerates a missing KubevirtMachineTemplate CRD instead of wedging the finalizer
+    documentSelector:
+      path: kind
+      value: Job
+    asserts:
+      # KMT discovery must distinguish a missing CRD (skip: nothing to unpin)
+      # from a real API/RBAC failure (exit 1). During a management-cluster CAPI
+      # teardown or a Terminating namespace the CRD can be gone; failing there
+      # would exhaust backoffLimit and wedge the HR finalizer on a resource type
+      # that no longer exists.
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[0]
+          pattern: "the server doesn't have a resource type"
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[0]
+          pattern: "CRD absent; nothing to unpin"
+
   - it: runs the unpin Job pod PSS-restricted
     documentSelector:
       path: kind
