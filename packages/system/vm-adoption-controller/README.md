@@ -8,11 +8,12 @@ When Forklift imports VMs from VMware, it creates native KubeVirt `VirtualMachin
 
 ## How it works
 
-1. **Watches** VirtualMachines with label `forklift.konveyor.io/plan`
-2. **Checks** if the Plan has annotation `vm-import.cozystack.io/adoption-enabled: "true"`
-3. **Extracts** VM specs (instance type, disks, network, etc.)
-4. **Creates** a `VMInstance` CRD with the extracted configuration
-5. **Labels** the original VM with `cozystack.io/adopted: "true"`
+1. **Polls** VirtualMachines carrying the Forklift `plan` label, whose value is the Plan **UID** (release-2.11+), and resolves it to a Plan cluster-wide
+2. **Verifies** the VM belongs to that Plan — it must live in the Plan's namespace or the one the Plan targets, and its `vmID` must be listed in `spec.vms`
+3. **Checks** if the Plan has annotation `vm-import.cozystack.io/adoption-enabled: "true"`
+4. **Extracts** VM specs (instance type, disks, network, etc.)
+5. **Creates** a `VMInstance` CRD with the extracted configuration
+6. **Releases** the source VM — deleted when the VMInstance lands in the same namespace, otherwise labeled `cozystack.io/adopted: "true"`
 
 ## Adoption Process
 
@@ -65,7 +66,7 @@ spec:
 ### Labels on created VMInstance
 
 - `cozystack.io/source: "vm-import"` - Source of VM
-- `forklift.konveyor.io/plan: "<plan-name>"` - Original migration plan
+- `vm-import.cozystack.io/plan: "<plan-name>"` - Original migration plan
 
 ### Annotations on created VMInstance
 
@@ -76,11 +77,13 @@ spec:
 
 The controller requires cluster-wide permissions:
 
-- **kubevirt.io/virtualmachines**: get, list, watch, update (to label adopted VMs)
-- **forklift.konveyor.io/plans**: get, list, watch (to check adoption settings)
-- **apps.cozystack.io/vminstances**: get, list, watch, create (to create VMInstances)
-- **apps.cozystack.io/vmdisks**: get, list, watch, create (for disk adoption)
-- **cdi.kubevirt.io/datavolumes**: get, list, watch (to discover disks)
+- **kubevirt.io/virtualmachines**: get, list, watch, update, patch, delete (to label adopted VMs, and remove the Forklift VM the managed VMInstance replaces)
+- **forklift.konveyor.io/plans, migrations**: get, list, watch (to check adoption settings and migration completion)
+- **apps.cozystack.io/vminstances, vmdisks**: get, list, watch, create, update, patch, delete
+- **cdi.kubevirt.io/datavolumes**: get, list, watch, create, update, patch (to clone imported disks into the tenant)
+- **cdi.kubevirt.io/datavolumes/source**: create (to authorize the cross-namespace clone)
+- **persistentvolumeclaims**: get, list (to size the clone)
+- **events**: create, patch (to surface adoption outcomes on the imported VM)
 
 ## Troubleshooting
 
@@ -91,9 +94,10 @@ The controller requires cluster-wide permissions:
    kubectl logs -n cozy-forklift deployment/vm-adoption-controller
    ```
 
-2. Verify VirtualMachine has Forklift label:
+2. Verify the VirtualMachine carries the Forklift label, and that its value is the UID of the Plan you expect:
    ```bash
-   kubectl get vm <vm-name> -n <namespace> -o jsonpath='{.metadata.labels.forklift\.konveyor\.io/plan}'
+   kubectl get vm <vm-name> -n <namespace> -o jsonpath='{.metadata.labels.plan}'
+   kubectl get plan <plan-name> -n <namespace> -o jsonpath='{.metadata.uid}'
    ```
 
 3. Check Plan annotation:

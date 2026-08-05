@@ -33,12 +33,12 @@ Cozystack manages VMs via Helm applications (`vm-instance`, `vm-disk`).
 
 #### Phase 1: Forklift Labels (automatic)
 
-VMs created by Forklift already have labels:
+VMs created by Forklift (release-2.11+) already have labels. Note that `plan` carries the Plan **UID**, not its name, so the controller resolves it cluster-wide:
 ```yaml
 metadata:
   labels:
-    forklift.konveyor.io/plan: <plan-name>
-    forklift.konveyor.io/vm-name: <vm-name>
+    plan: <plan-uid>
+    vmID: <vsphere-vm-moref>
 ```
 
 The Plan gets adoption annotations when `enableAdoption: true`:
@@ -53,7 +53,7 @@ metadata:
 
 A dedicated controller (`vm-adoption-controller`) deployed as a platform package:
 
-1. **Watches** VMs with label `forklift.konveyor.io/plan`
+1. **Polls** VMs with the `plan` label and resolves the UID to a Plan, verifying the VM actually belongs to it
 2. **Checks** the Plan annotation `vm-import.cozystack.io/adoption-enabled`
 3. **Creates** a `VMInstance` CRD via the Cozystack aggregated API
 4. **Labels** the original VM as adopted:

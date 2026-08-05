@@ -72,9 +72,12 @@ Once completed, the migrated VMs will be available as KubeVirt VirtualMachine re
 
 List the imported VMs:
 
+Forklift labels each imported VM with `plan=<Plan UID>`, so resolve the UID first:
+
 ```bash
 kubectl get virtualmachines -n <your-namespace>
-kubectl get vm -n <your-namespace> -l forklift.konveyor.io/plan=<your-import-name>
+PLAN_UID=$(kubectl get plan <your-import-name> -n <your-namespace> -o jsonpath='{.metadata.uid}')
+kubectl get vm -n <your-namespace> -l plan=$PLAN_UID
 ```
 
 Check if VMs are labeled for Cozystack adoption:
@@ -89,10 +92,10 @@ kubectl get vm -n <your-namespace> -l cozystack.io/adopted=true
 
 1. **Forklift Migration**: VMs are migrated from VMware and created as native KubeVirt `VirtualMachine` resources
 2. **Automatic Adoption**: If `enableAdoption: true` (default), the VM Adoption Controller automatically:
-   - Detects the imported VMs (via `forklift.konveyor.io/plan` label)
+   - Detects the imported VMs (via the Forklift `plan` label, whose value is the Plan UID) and verifies each one belongs to that Plan
    - Extracts VM configuration (instance type, disks, network, resources)
    - Creates a `VMInstance` Cozystack CRD
-   - Labels the original VM as `cozystack.io/adopted: "true"`
+   - Releases the original VM: deleted when the `VMInstance` lands in the same namespace, otherwise labeled `cozystack.io/adopted: "true"`
 3. **Dashboard Integration**: The `VMInstance` is managed by Cozystack's controller, which creates a HelmRelease
 4. **Dashboard Visibility**: Adopted VMs appear in the Cozystack dashboard as regular VM Instances
 
@@ -162,14 +165,18 @@ virtctl ssh <vm-name> -n <namespace>
 To fully remove imported VMs from your cluster:
 
 ```bash
-# 1. Delete the vm-import application (if not already done)
+# 1. Resolve the Plan UID Forklift stamped on the imported VMs — do this first,
+#    the Plan goes away with the vm-import application
+PLAN_UID=$(kubectl get plan <import-name> -n <namespace> -o jsonpath='{.metadata.uid}')
+
+# 2. Delete the vm-import application (if not already done)
 kubectl delete vmimport <import-name> -n <namespace>
 
-# 2. Manually delete the VMs
-kubectl delete vm -n <namespace> -l forklift.konveyor.io/plan=<import-name>
+# 3. Manually delete the VMs
+kubectl delete vm -n <namespace> -l plan=$PLAN_UID
 
-# 3. (Optional) Delete associated DataVolumes
-kubectl delete dv -n <namespace> -l forklift.konveyor.io/plan=<import-name>
+# 4. (Optional) Delete associated DataVolumes
+kubectl delete dv -n <namespace> -l plan=$PLAN_UID
 ```
 
 ## Parameters

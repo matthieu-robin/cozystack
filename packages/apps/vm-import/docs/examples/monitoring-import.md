@@ -48,8 +48,9 @@ As VMs are migrated, they appear as KubeVirt VirtualMachines:
 # Watch for new VMs
 kubectl get vm -n production --watch
 
-# Filter by import
-kubectl get vm -n production -l forklift.konveyor.io/plan=production-migration
+# Filter by import (Forklift labels VMs with the Plan UID, not its name)
+PLAN_UID=$(kubectl get plan production-migration -n production -o jsonpath='{.metadata.uid}')
+kubectl get vm -n production -l plan=$PLAN_UID
 
 # Check adoption labels
 kubectl get vm -n production -l cozystack.io/adopted=true
@@ -157,7 +158,8 @@ kubectl describe provider production-migration-source -n production | grep -A 5 
 EXPECTED=4
 
 # Count created VMs
-ACTUAL=$(kubectl get vm -n production -l forklift.konveyor.io/plan=production-migration --no-headers | wc -l)
+PLAN_UID=$(kubectl get plan production-migration -n production -o jsonpath='{.metadata.uid}')
+ACTUAL=$(kubectl get vm -n production -l plan=$PLAN_UID --no-headers | wc -l)
 
 echo "Expected: $EXPECTED, Actual: $ACTUAL"
 ```

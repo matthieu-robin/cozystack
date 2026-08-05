@@ -6,7 +6,7 @@ This guide explains how imported VMs are integrated into Cozystack's management 
 
 When `enableAdoption: true` (default), the **vm-adoption-controller** automatically adopts imported VMs:
 
-1. Detects VMs with the `forklift.konveyor.io/plan` label
+1. Detects VMs with the Forklift `plan` label — whose value is the Plan UID — and verifies each one belongs to the Plan it names
 2. Annotates the existing VM with Helm ownership metadata
 3. Creates a `VMInstance` CRD via the Cozystack aggregated API
 4. The standard cozystack-controller creates a HelmRelease
