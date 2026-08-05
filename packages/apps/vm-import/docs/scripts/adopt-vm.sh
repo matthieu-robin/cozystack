@@ -6,7 +6,7 @@
 # Example:
 #   ./adopt-vm.sh web-server default u1.medium ubuntu
 
-set -e
+set -euo pipefail
 
 # Colors for output
 RED='\033[0;31m'
@@ -37,26 +37,33 @@ if ! kubectl get vm "$VM_NAME" -n "$NAMESPACE" &>/dev/null; then
 fi
 echo -e "${GREEN}✓${NC} VM found"
 
-# Extract current configuration
-echo -e "${YELLOW}[2/5]${NC} Extracting current VM configuration..."
-RUNNING=$(kubectl get vm "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.spec.running}' 2>/dev/null || echo "false")
-echo "  Running state: $RUNNING"
+# Read the VM once. An auth or API failure must abort rather than degrade to
+# empty output, which would silently produce a wrong values file.
+VM_JSON=$(kubectl get vm "$VM_NAME" -n "$NAMESPACE" -o json)
 
-# Check if VM has Forklift labels
-IS_IMPORTED=$(kubectl get vm "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.metadata.labels.forklift\.konveyor\.io/plan}' 2>/dev/null || echo "")
+# Extract current configuration. runStrategy is authoritative; spec.running is
+# the deprecated form and is only consulted when runStrategy is unset (the same
+# precedence the adoption controller applies).
+echo -e "${YELLOW}[2/5]${NC} Extracting current VM configuration..."
+RUN_STRATEGY=$(jq -r '.spec.runStrategy // (if .spec.running == true then "Always" elif .spec.running == false then "Halted" else "Always" end)' <<<"$VM_JSON")
+echo "  Run strategy: $RUN_STRATEGY"
+
+# Check if VM has Forklift labels. Forklift (release-2.11+) stamps the bare
+# `plan` key, whose value is the Plan UID rather than its name.
+IS_IMPORTED=$(jq -r '.metadata.labels.plan // ""' <<<"$VM_JSON")
 if [ -n "$IS_IMPORTED" ]; then
-    echo -e "  ${GREEN}✓${NC} VM was imported via Forklift (plan: $IS_IMPORTED)"
+    echo -e "  ${GREEN}✓${NC} VM was imported via Forklift (plan UID: $IS_IMPORTED)"
 else
     echo -e "  ${YELLOW}⚠${NC}  VM was not imported via Forklift (manual creation?)"
 fi
 
-# Find attached DataVolumes
+# Find attached disks. Forklift backs them either by a DataVolume or by a PVC
+# populated by the CDI volume populator, so both shapes must be discovered.
 echo -e "${YELLOW}[3/5]${NC} Discovering attached disks..."
-DISK_NAMES=$(kubectl get vm "$VM_NAME" -n "$NAMESPACE" -o json 2>/dev/null | \
-  jq -r '.spec.template.spec.volumes[]? | select(.dataVolume) | .dataVolume.name' || echo "")
+DISK_NAMES=$(jq -r '.spec.template.spec.volumes[]? | (.dataVolume.name // .persistentVolumeClaim.claimName) // empty' <<<"$VM_JSON")
 
 if [ -z "$DISK_NAMES" ]; then
-    echo -e "  ${YELLOW}⚠${NC}  No DataVolumes found attached to VM"
+    echo -e "  ${YELLOW}⚠${NC}  No disks found attached to VM"
     DISKS_YAML="  # No disks found - add manually if needed"
 else
     DISKS_YAML=""
@@ -89,8 +96,7 @@ fi
 
 # Check for networks
 echo -e "  Checking network configuration..."
-NETWORKS=$(kubectl get vm "$VM_NAME" -n "$NAMESPACE" -o json 2>/dev/null | \
-  jq -r '.spec.template.spec.networks[]? | select(.multus) | .multus.networkName' || echo "")
+NETWORKS=$(jq -r '.spec.template.spec.networks[]? | select(.multus) | .multus.networkName' <<<"$VM_JSON")
 
 if [ -n "$NETWORKS" ]; then
     echo -e "  ${GREEN}✓${NC} Found Multus networks:"
@@ -121,7 +127,7 @@ cat > "$OUTPUT_FILE" <<EOF
 #     --values $OUTPUT_FILE
 
 # === Basic Configuration ===
-running: ${RUNNING}
+runStrategy: ${RUN_STRATEGY}
 
 # === Instance Configuration ===
 instanceType: ${INSTANCE_TYPE}
@@ -177,8 +183,8 @@ echo ""
 # Display summary
 echo -e "${GREEN}=== Adoption Summary ===${NC}"
 echo "VM: $VM_NAME (namespace: $NAMESPACE)"
-echo "Current state: $([ "$RUNNING" = "true" ] && echo "Running" || echo "Stopped")"
-echo "Disks: $(echo "$DISKS_YAML" | grep -c "name:" || echo "0")"
+echo "Run strategy: $RUN_STRATEGY"
+echo "Disks: $(grep -c "name:" <<<"$DISKS_YAML" || true)"
 echo "Values file: $OUTPUT_FILE"
 echo ""
 
