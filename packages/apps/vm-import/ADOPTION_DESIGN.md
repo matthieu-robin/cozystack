@@ -18,9 +18,7 @@ Cozystack manages VMs via Helm applications (`vm-instance`, `vm-disk`).
 - `Plan`
 - `Migration`
 
-**On vm-import deletion**:
-- `Providers` are kept with `helm.sh/resource-policy: keep` (reusable for future imports)
-- Other resources (Plan, Migration, Maps) are deleted (temporary migration objects)
+**On vm-import deletion**: every resource above is deleted with the release. The Providers are named after the release, so nothing outside it can reuse them, and keeping them would make a VMImport of the same name unreinstallable — Helm refuses to adopt a resource it left behind (`invalid ownership metadata`).
 
 #### Resources created by Forklift (NOT managed by Helm)
 - `VirtualMachine` (KubeVirt)
