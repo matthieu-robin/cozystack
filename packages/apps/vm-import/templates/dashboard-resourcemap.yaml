@@ -1,3 +1,9 @@
+{{- /* The RoleBinding grants this tenant's own users read access to the import
+       resources in the dashboard. An admin-directed import deployed in a
+       privileged namespace has no tenant subjects to bind, and cozy-lib rejects
+       a non-tenant- namespace as a tenant identifier, so skip the whole
+       resource map there rather than failing the render. */}}
+{{- if hasPrefix "tenant-" .Release.Namespace }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -27,3 +33,4 @@ roleRef:
   kind: Role
   name: {{ .Release.Name }}-dashboard-resources
   apiGroup: rbac.authorization.k8s.io
+{{- end }}
