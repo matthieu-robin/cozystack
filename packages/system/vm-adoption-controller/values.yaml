@@ -3,8 +3,6 @@
 # Full container image reference (populated by `make image` with digest pin).
 image: ""
 
-replicas: 1
-
 resources:
   requests:
     cpu: 100m

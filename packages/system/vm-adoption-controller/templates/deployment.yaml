@@ -6,7 +6,10 @@ metadata:
   labels:
     app: vm-adoption-controller
 spec:
-  replicas: {{ .Values.replicas }}
+  # Pinned: the controller reconciles by mutating cluster state (deleting
+  # Forklift VMs, creating VMInstances and cloning DataVolumes) and has no
+  # leader election, so a second replica would race the first on the same VM.
+  replicas: 1
   selector:
     matchLabels:
       app: vm-adoption-controller

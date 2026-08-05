@@ -12,6 +12,11 @@ tests:
       - equal:
           path: spec.template.spec.serviceAccountName
           value: vm-adoption-controller
+      # Not operator-settable: no leader election, so a second replica races
+      # the first on the same VM (double delete/create/clone).
+      - equal:
+          path: spec.replicas
+          value: 1
       - equal:
           path: spec.template.spec.containers[0].securityContext.runAsNonRoot
           value: true
