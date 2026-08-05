@@ -9,11 +9,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/tools/record"
 )
 
 var (
 	plansGVR      = schema.GroupVersionResource{Group: "forklift.konveyor.io", Version: "v1beta1", Resource: "plans"}
 	migrationsGVR = schema.GroupVersionResource{Group: "forklift.konveyor.io", Version: "v1beta1", Resource: "migrations"}
+	vmsGVR        = schema.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "virtualmachines"}
 )
 
 func newForkliftObj(kind, namespace, name, uid string, ann map[string]string) *unstructured.Unstructured {
@@ -49,9 +51,20 @@ func fakeClient(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 		map[schema.GroupVersionResource]string{
 			plansGVR:      "PlanList",
 			migrationsGVR: "MigrationList",
+			vmsGVR:        "VirtualMachineList",
 		},
 		objs...,
 	)
+}
+
+func newVM(namespace, name string, labels map[string]string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{Object: map[string]interface{}{}}
+	u.SetAPIVersion("kubevirt.io/v1")
+	u.SetKind("VirtualMachine")
+	u.SetNamespace(namespace)
+	u.SetName(name)
+	u.SetLabels(labels)
+	return u
 }
 
 // getTargetNamespace must apply the same cross-tenant guard end-to-end via the
@@ -92,11 +105,45 @@ func TestResolvePlan(t *testing.T) {
 		newForkliftObj("Plan", "tenant-a", "import-1", "uid-aaa", nil),
 		newForkliftObj("Plan", "cozy-forklift", "import-2", "uid-bbb", nil),
 	)}
-	if name, ns, ok := c.resolvePlan(context.Background(), "uid-bbb"); !ok || name != "import-2" || ns != "cozy-forklift" {
-		t.Errorf("resolvePlan(uid-bbb) = %q/%q ok=%v, want cozy-forklift/import-2 ok=true", ns, name, ok)
+	if plan, ok := c.resolvePlan(context.Background(), "uid-bbb"); !ok || plan.GetName() != "import-2" || plan.GetNamespace() != "cozy-forklift" {
+		t.Errorf("resolvePlan(uid-bbb) = %v ok=%v, want cozy-forklift/import-2 ok=true", plan, ok)
 	}
-	if _, _, ok := c.resolvePlan(context.Background(), "uid-unknown"); ok {
+	if _, ok := c.resolvePlan(context.Background(), "uid-unknown"); ok {
 		t.Errorf("resolvePlan(unknown) ok=true, want false")
+	}
+}
+
+// A tenant super-admin can create raw kubevirt VMs, so a VM carrying the UID of
+// another tenant's Plan must never reach adoption: the target namespace is
+// derived from the resolved Plan, so honoring the label would have this
+// cluster-privileged controller write into the victim's namespace.
+func TestGetForkliftVMsRejectsForeignPlanClaim(t *testing.T) {
+	victimPlan := newForkliftObj("Plan", "tenant-victim", "import-1", "uid-victim", nil)
+	_ = unstructured.SetNestedSlice(victimPlan.Object, []interface{}{
+		map[string]interface{}{"id": "vm-100"},
+	}, "spec", "vms")
+
+	c := &AdoptionController{
+		dynamicClient: fakeClient(
+			victimPlan,
+			newMigration("tenant-victim", "import-1", true),
+			newVM("tenant-victim", "legit", map[string]string{"plan": "uid-victim", "vmID": "vm-100"}),
+			newVM("tenant-attacker", "forged", map[string]string{"plan": "uid-victim", "vmID": "vm-100"}),
+			newVM("tenant-victim", "unlisted", map[string]string{"plan": "uid-victim", "vmID": "vm-999"}),
+		),
+		planCache: make(map[string]*PlanCacheEntry),
+		recorder:  record.NewFakeRecorder(10),
+	}
+
+	vms, err := c.getForkliftVMs(context.Background())
+	if err != nil {
+		t.Fatalf("getForkliftVMs: %v", err)
+	}
+	if len(vms) != 1 {
+		t.Fatalf("got %d adoptable VMs, want 1: %+v", len(vms), vms)
+	}
+	if vms[0].Namespace != "tenant-victim" || vms[0].Name != "legit" {
+		t.Errorf("adopted %s/%s, want tenant-victim/legit", vms[0].Namespace, vms[0].Name)
 	}
 }
 

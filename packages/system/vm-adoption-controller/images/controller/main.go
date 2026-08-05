@@ -269,9 +269,28 @@ func (c *AdoptionController) getForkliftVMs(ctx context.Context) ([]kubevirtv1.V
 			continue
 		}
 
-		planName, planNamespace, ok := c.resolvePlan(ctx, planUID)
+		plan, ok := c.resolvePlan(ctx, planUID)
 		if !ok {
 			klog.V(2).Infof("VM %s/%s: no Plan found for UID %s, skipping", item.GetNamespace(), item.GetName(), planUID)
+			continue
+		}
+		planName, planNamespace := plan.GetName(), plan.GetNamespace()
+
+		// Convert to typed VM (only name/namespace/labels — full spec fetched in adoptVM)
+		vm := kubevirtv1.VirtualMachine{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      item.GetName(),
+				Namespace: item.GetNamespace(),
+				Labels:    item.GetLabels(),
+			},
+		}
+
+		// The "plan" label is attacker-controlled, so it only points at the Plan
+		// whose authority this VM may borrow — it does not establish it.
+		if err := validateVMBelongsToPlan(plan, vm.Namespace, labels[forkliftVMLabel]); err != nil {
+			klog.Warningf("VM %s/%s claims Plan %s/%s but does not belong to it, refusing adoption: %v", vm.Namespace, vm.Name, planNamespace, planName, err)
+			c.recorder.Eventf(vmRef(&vm), corev1.EventTypeWarning, "AdoptionRejected",
+				"VM claims Forklift Plan %s/%s but does not belong to it: %v", planNamespace, planName, err)
 			continue
 		}
 
@@ -286,14 +305,7 @@ func (c *AdoptionController) getForkliftVMs(ctx context.Context) ([]kubevirtv1.V
 			continue
 		}
 
-		// Convert to typed VM (only name/namespace/labels — full spec fetched in adoptVM)
-		vms = append(vms, kubevirtv1.VirtualMachine{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      item.GetName(),
-				Namespace: item.GetNamespace(),
-				Labels:    item.GetLabels(),
-			},
-		})
+		vms = append(vms, vm)
 	}
 
 	return vms, nil
@@ -303,9 +315,13 @@ func (c *AdoptionController) getForkliftVMs(ctx context.Context) ([]kubevirtv1.V
 // stamps on migrated VMs via the "plan" label. The search is cluster-wide
 // because the Plan may live in a different namespace than the migrated VM
 // (e.g. when the Plan targets a tenant namespace directly via
-// Plan.spec.targetNamespace). Returns the Plan name, its namespace, and true
-// when a Plan with that UID exists.
-func (c *AdoptionController) resolvePlan(ctx context.Context, planUID string) (string, string, bool) {
+// Plan.spec.targetNamespace). Returns the Plan and true when one with that
+// UID exists.
+//
+// The UID comes from a label on the VM, which is not a trustworthy claim of
+// ownership — see validateVMBelongsToPlan, which every caller must run before
+// deriving any authority from the returned Plan.
+func (c *AdoptionController) resolvePlan(ctx context.Context, planUID string) (*unstructured.Unstructured, bool) {
 	gvr := schema.GroupVersionResource{
 		Group:    "forklift.konveyor.io",
 		Version:  "v1beta1",
@@ -314,14 +330,54 @@ func (c *AdoptionController) resolvePlan(ctx context.Context, planUID string) (s
 	list, err := c.dynamicClient.Resource(gvr).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		klog.V(2).Infof("Failed to list Plans: %v", err)
-		return "", "", false
+		return nil, false
 	}
-	for _, p := range list.Items {
-		if string(p.GetUID()) == planUID {
-			return p.GetName(), p.GetNamespace(), true
+	for i := range list.Items {
+		if string(list.Items[i].GetUID()) == planUID {
+			return &list.Items[i], true
 		}
 	}
-	return "", "", false
+	return nil, false
+}
+
+// validateVMBelongsToPlan rejects a VirtualMachine whose adoption authority does
+// not actually come from the Plan its "plan" label points at.
+//
+// The label is attacker-controlled: `cozy:tenant:super-admin:base` grants tenant
+// super-admins full access to kubevirt VirtualMachines, so a tenant can create a
+// raw VM carrying the UID of a Plan owned by another tenant. Since resolvePlan
+// searches cluster-wide and the target namespace is then derived from the
+// resolved Plan, an unchecked label would let that tenant have this
+// cluster-privileged controller create VMDisks and a VMInstance inside the
+// victim's namespace. resolveTargetNamespace does not help: it confines to the
+// resolved Plan's namespace, and the attacker chose which Plan that is.
+//
+// The namespace check is what closes that hole — Forklift only ever creates the
+// migrated VM in the Plan's own namespace or in the namespace the Plan targets.
+// The vmID check is defense in depth and is only enforced when the VM carries the
+// label, so an older Forklift that does not stamp it still adopts normally.
+func validateVMBelongsToPlan(plan *unstructured.Unstructured, vmNamespace, vmID string) error {
+	planNamespace := plan.GetNamespace()
+	targetNamespace, _, _ := unstructured.NestedString(plan.Object, "spec", "targetNamespace")
+	if vmNamespace != planNamespace && (targetNamespace == "" || vmNamespace != targetNamespace) {
+		return fmt.Errorf("VM lives in namespace %q, but Plan %s/%s neither lives there nor targets it",
+			vmNamespace, planNamespace, plan.GetName())
+	}
+
+	if vmID == "" {
+		return nil
+	}
+	planVMs, _, _ := unstructured.NestedSlice(plan.Object, "spec", "vms")
+	for _, entry := range planVMs {
+		entryMap, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if id, _, _ := unstructured.NestedString(entryMap, "id"); id == vmID {
+			return nil
+		}
+	}
+	return fmt.Errorf("VM id %q is not listed in Plan %s/%s spec.vms", vmID, planNamespace, plan.GetName())
 }
 
 // isMigrationComplete checks that the Forklift Migration for this plan has
@@ -645,9 +701,16 @@ func (c *AdoptionController) adoptVM(ctx context.Context, vm kubevirtv1.VirtualM
 
 	// Resolve the Plan once (cluster-wide by UID — it may live in a different
 	// namespace than the VM) and read its optional preset overrides.
-	planName, planNamespace, ok := c.resolvePlan(ctx, vm.Labels[forkliftPlanLabel])
+	plan, ok := c.resolvePlan(ctx, vm.Labels[forkliftPlanLabel])
 	if !ok {
 		return fmt.Errorf("could not resolve Forklift Plan for UID %q", vm.Labels[forkliftPlanLabel])
+	}
+	planName, planNamespace := plan.GetName(), plan.GetNamespace()
+	// Re-check here too: getForkliftVMs validated the same pair, but adoptVM is
+	// the function that acts on the Plan's authority and the Plan may have been
+	// swapped between the two.
+	if err := validateVMBelongsToPlan(plan, vm.Namespace, vm.Labels[forkliftVMLabel]); err != nil {
+		return fmt.Errorf("VM does not belong to Plan %s/%s: %w", planNamespace, planName, err)
 	}
 	presetInstanceType, presetPreference := c.getPlanPreset(ctx, planNamespace, planName)
 
