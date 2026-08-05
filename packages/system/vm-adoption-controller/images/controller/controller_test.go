@@ -2,20 +2,26 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/record"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 )
 
 var (
-	plansGVR      = schema.GroupVersionResource{Group: "forklift.konveyor.io", Version: "v1beta1", Resource: "plans"}
-	migrationsGVR = schema.GroupVersionResource{Group: "forklift.konveyor.io", Version: "v1beta1", Resource: "migrations"}
-	vmsGVR        = schema.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "virtualmachines"}
+	plansGVR       = schema.GroupVersionResource{Group: "forklift.konveyor.io", Version: "v1beta1", Resource: "plans"}
+	migrationsGVR  = schema.GroupVersionResource{Group: "forklift.konveyor.io", Version: "v1beta1", Resource: "migrations"}
+	vmsGVR         = schema.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "virtualmachines"}
+	vmInstancesGVR = schema.GroupVersionResource{Group: vmInstanceGroup, Version: vmInstanceVersion, Resource: "vminstances"}
 )
 
 func newForkliftObj(kind, namespace, name, uid string, ann map[string]string) *unstructured.Unstructured {
@@ -49,9 +55,10 @@ func fakeClient(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{
-			plansGVR:      "PlanList",
-			migrationsGVR: "MigrationList",
-			vmsGVR:        "VirtualMachineList",
+			plansGVR:       "PlanList",
+			migrationsGVR:  "MigrationList",
+			vmsGVR:         "VirtualMachineList",
+			vmInstancesGVR: "VMInstanceList",
 		},
 		objs...,
 	)
@@ -144,6 +151,65 @@ func TestGetForkliftVMsRejectsForeignPlanClaim(t *testing.T) {
 	}
 	if vms[0].Namespace != "tenant-victim" || vms[0].Name != "legit" {
 		t.Errorf("adopted %s/%s, want tenant-victim/legit", vms[0].Namespace, vms[0].Name)
+	}
+}
+
+// Same-namespace adoption must never release the source VM before the
+// VMInstance exists: getForkliftVMs keys reconciliation on that VM, so a
+// rejected create would leave the imported VM destroyed with nothing left to
+// retry from.
+func TestAdoptVMViaVMDisksKeepsSourceVMWhenCreateFails(t *testing.T) {
+	client := fakeClient(newVM("tenant-a", "web", map[string]string{"plan": "uid-1"}))
+	client.PrependReactor("create", "vminstances", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(vmInstancesGVR.GroupResource(), "web", errors.New("exceeded quota"))
+	})
+	c := &AdoptionController{dynamicClient: client, recorder: record.NewFakeRecorder(10)}
+
+	vm := kubevirtv1.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-a", Name: "web"}}
+	if err := c.adoptVMViaVMDisks(context.Background(), vm, "tenant-a", "web", nil, nil, nil, "u1.medium", "ubuntu", "Always", "import-1"); err == nil {
+		t.Fatal("adoptVMViaVMDisks succeeded, want the create error")
+	}
+
+	if _, err := client.Resource(vmsGVR).Namespace("tenant-a").Get(context.Background(), "web", metav1.GetOptions{}); err != nil {
+		t.Errorf("source VM was released despite the failed create: %v", err)
+	}
+}
+
+func TestAdoptVMViaVMDisksRemovesSourceVMAfterCreate(t *testing.T) {
+	client := fakeClient(newVM("tenant-a", "web", map[string]string{"plan": "uid-1"}))
+	c := &AdoptionController{dynamicClient: client, recorder: record.NewFakeRecorder(10)}
+
+	vm := kubevirtv1.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-a", Name: "web"}}
+	if err := c.adoptVMViaVMDisks(context.Background(), vm, "tenant-a", "web", nil, nil, nil, "u1.medium", "ubuntu", "Always", "import-1"); err != nil {
+		t.Fatalf("adoptVMViaVMDisks: %v", err)
+	}
+
+	if _, err := client.Resource(vmInstancesGVR).Namespace("tenant-a").Get(context.Background(), "web", metav1.GetOptions{}); err != nil {
+		t.Errorf("VMInstance was not created: %v", err)
+	}
+	if _, err := client.Resource(vmsGVR).Namespace("tenant-a").Get(context.Background(), "web", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("source VM still present after adoption, got err %v", err)
+	}
+}
+
+// A delete that failed on an earlier pass must be replayed, otherwise the source
+// VM is re-listed forever while the VMInstance already exists.
+func TestAdoptVMViaVMDisksReplaysDeleteWhenVMInstanceExists(t *testing.T) {
+	existing := &unstructured.Unstructured{Object: map[string]interface{}{}}
+	existing.SetAPIVersion(vmInstanceGroup + "/" + vmInstanceVersion)
+	existing.SetKind(vmInstanceKind)
+	existing.SetNamespace("tenant-a")
+	existing.SetName("web")
+
+	client := fakeClient(existing, newVM("tenant-a", "web", map[string]string{"plan": "uid-1"}))
+	c := &AdoptionController{dynamicClient: client, recorder: record.NewFakeRecorder(10)}
+
+	vm := kubevirtv1.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-a", Name: "web"}}
+	if err := c.adoptVMViaVMDisks(context.Background(), vm, "tenant-a", "web", nil, nil, nil, "u1.medium", "ubuntu", "Always", "import-1"); err != nil {
+		t.Fatalf("adoptVMViaVMDisks: %v", err)
+	}
+	if _, err := client.Resource(vmsGVR).Namespace("tenant-a").Get(context.Background(), "web", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("source VM still present, got err %v", err)
 	}
 }
 

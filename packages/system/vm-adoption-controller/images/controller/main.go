@@ -924,36 +924,29 @@ func (c *AdoptionController) adoptVM(ctx context.Context, vm kubevirtv1.VirtualM
 
 // adoptVMViaVMDisks creates the managed VMInstance in the target namespace
 // referencing the VMDisks produced by wrapDisksAsVMDisks. The Forklift-created
-// VM is removed (same namespace) or labeled adopted (different namespace) so it
-// is not reprocessed; the imported PVC it referenced lives on only as the clone
-// source of the VMDisk.
+// VM is then removed (same namespace) or labeled adopted (different namespace)
+// so it is not reprocessed; the imported PVC it referenced lives on only as the
+// clone source of the VMDisk.
+//
+// The VMInstance is created before the source VM is released, never the other
+// way round: getForkliftVMs keys reconciliation on the source VM, so deleting it
+// first would make a rejected create unrecoverable — the imported VM destroyed,
+// the VMDisks orphaned, and nothing left for the next loop to retry. Creating
+// first costs a brief window in which the VirtualMachine rendered by the
+// vm-instance HelmRelease shares a name with the Forklift VM still standing; the
+// delete follows immediately, and should Flux reconcile in between, the install
+// simply converges once the source VM is gone.
 func (c *AdoptionController) adoptVMViaVMDisks(ctx context.Context, vm kubevirtv1.VirtualMachine,
 	targetNamespace, vmInstanceName string, disks, networks []interface{},
 	firmware map[string]interface{}, instanceType, preference, runStrategy, planName string) error {
 
 	vmInstanceGVR := schema.GroupVersionResource{Group: vmInstanceGroup, Version: vmInstanceVersion, Resource: "vminstances"}
 
-	// Idempotency: if the VMInstance already exists, just mark the source adopted.
+	// Idempotency: if the VMInstance already exists, the create succeeded on an
+	// earlier pass and only the source VM is left to release.
 	if _, err := c.dynamicClient.Resource(vmInstanceGVR).Namespace(targetNamespace).Get(ctx, vmInstanceName, metav1.GetOptions{}); err == nil {
 		klog.Infof("VMInstance %s/%s already exists, ensuring source VM is handled", targetNamespace, vmInstanceName)
-		if targetNamespace == vm.Namespace {
-			return nil
-		}
-		return c.labelVMAsAdopted(ctx, vm.Namespace, vm.Name, vmInstanceName, "vm-instance-"+vmInstanceName)
-	}
-
-	// Same-namespace adoption: the managed VMInstance renders a VirtualMachine
-	// with the same name as the Forklift VM, so remove the Forklift VM first to
-	// avoid a name collision. The imported PVC stays (it is the VMDisk clone
-	// source); KubeVirt does not delete PVCs when a VM is deleted.
-	sourceVMRemoved := false
-	if targetNamespace == vm.Namespace {
-		vmGVR := schema.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "virtualmachines"}
-		if err := c.dynamicClient.Resource(vmGVR).Namespace(vm.Namespace).Delete(ctx, vm.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("failed to remove Forklift VM %s/%s before adoption: %w", vm.Namespace, vm.Name, err)
-		}
-		sourceVMRemoved = true
-		klog.Infof("Removed Forklift VM %s/%s (replaced by managed VMInstance)", vm.Namespace, vm.Name)
+		return c.releaseSourceVM(ctx, vm, targetNamespace, vmInstanceName)
 	}
 
 	spec := map[string]interface{}{
@@ -1002,13 +995,37 @@ func (c *AdoptionController) adoptVMViaVMDisks(ctx context.Context, vm kubevirtv
 	c.recorder.Eventf(vmRef(&vm), corev1.EventTypeNormal, "Adopted",
 		"Imported VM adopted as Cozystack VMInstance %s/%s", targetNamespace, vmInstanceName)
 
-	// Mark the source VM as adopted so it is not reprocessed (only relevant when
-	// it still exists, i.e. a different namespace than the managed VMInstance).
-	if !sourceVMRemoved {
-		if err := c.labelVMAsAdopted(ctx, vm.Namespace, vm.Name, vmInstanceName, "vm-instance-"+vmInstanceName); err != nil {
-			klog.Warningf("VMInstance created but failed to label source VM %s/%s as adopted: %v", vm.Namespace, vm.Name, err)
+	return c.releaseSourceVM(ctx, vm, targetNamespace, vmInstanceName)
+}
+
+// releaseSourceVM hands the Forklift-created VM over to the managed VMInstance,
+// once that VMInstance exists. In the same namespace the VMInstance renders a
+// VirtualMachine under the same name, so the Forklift VM has to go; the imported
+// PVC stays behind as the VMDisk clone source, since KubeVirt does not delete
+// PVCs with a VM. In a different namespace nothing collides, so the VM is only
+// labeled adopted to keep it out of the next reconcile.
+//
+// Failing here is retryable: the VMInstance is already created, so the next loop
+// takes the idempotency path and calls this again.
+func (c *AdoptionController) releaseSourceVM(ctx context.Context, vm kubevirtv1.VirtualMachine,
+	targetNamespace, vmInstanceName string) error {
+
+	helmReleaseName := "vm-instance-" + vmInstanceName
+	if targetNamespace != vm.Namespace {
+		if err := c.labelVMAsAdopted(ctx, vm.Namespace, vm.Name, vmInstanceName, helmReleaseName); err != nil {
+			return fmt.Errorf("failed to label source VM %s/%s as adopted: %w", vm.Namespace, vm.Name, err)
 		}
+		return nil
 	}
+
+	vmGVR := schema.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "virtualmachines"}
+	if err := c.dynamicClient.Resource(vmGVR).Namespace(vm.Namespace).Delete(ctx, vm.Name, metav1.DeleteOptions{}); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to remove Forklift VM %s/%s after adoption: %w", vm.Namespace, vm.Name, err)
+	}
+	klog.Infof("Removed Forklift VM %s/%s (replaced by managed VMInstance)", vm.Namespace, vm.Name)
 	return nil
 }
 
