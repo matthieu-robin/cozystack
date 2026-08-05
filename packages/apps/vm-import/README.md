@@ -202,13 +202,13 @@ kubectl delete dv -n <namespace> -l forklift.konveyor.io/plan=<import-name>
 
 ### Network Mapping
 
-| Name                                 | Description                                                                | Type       | Value |
-| ------------------------------------ | -------------------------------------------------------------------------- | ---------- | ----- |
-| `networkMap`                         | Mapping of source networks to destination networks.                        | `[]object` | `[]`  |
-| `networkMap[i].sourceId`             | The managed object reference ID of the source network in vSphere.          | `string`   | `""`  |
-| `networkMap[i].destinationType`      | Destination type: `pod` for pod network, or `multus` for a Multus network. | `string`   | `""`  |
-| `networkMap[i].destinationName`      | Name of the destination network (required if type is `multus`).            | `string`   | `""`  |
-| `networkMap[i].destinationNamespace` | Namespace of the destination network.                                      | `string`   | `""`  |
+| Name                                 | Description                                                                                                                                                                                                                                                                          | Type       | Value |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------- | ----- |
+| `networkMap`                         | Mapping of source networks to destination networks.                                                                                                                                                                                                                                  | `[]object` | `[]`  |
+| `networkMap[i].sourceId`             | The managed object reference ID of the source network in vSphere.                                                                                                                                                                                                                    | `string`   | `""`  |
+| `networkMap[i].destinationType`      | Destination type: `pod` for pod network, or `multus` for a Multus network.                                                                                                                                                                                                           | `string`   | `""`  |
+| `networkMap[i].destinationName`      | Name of the destination network (required if type is `multus`).                                                                                                                                                                                                                      | `string`   | `""`  |
+| `networkMap[i].destinationNamespace` | Namespace of the destination network. Only honored when this VMImport is deployed in a privileged (non-`tenant-*`) namespace; a VMImport deployed inside a tenant namespace is confined to its own namespace, so a tenant cannot attach the imported VM to another tenant's network. | `string`   | `""`  |
 
 
 ### Storage Mapping

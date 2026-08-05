@@ -1,4 +1,11 @@
 {{- if .Values.networkMap }}
+{{- /* Mirror the plan.yaml targetNamespace guard: a foreign destinationNamespace
+       is honored only for an admin-directed import (a release that does NOT live
+       in a tenant-* namespace). A release inside a tenant-* namespace is confined
+       to its own namespace, so a tenant cannot attach an imported VM's NIC to
+       another tenant's Multus NetworkAttachmentDefinition. */}}
+{{- $releaseNamespace := .Release.Namespace }}
+{{- $tenantScoped := hasPrefix "tenant-" $releaseNamespace }}
 apiVersion: forklift.konveyor.io/v1beta1
 kind: NetworkMap
 metadata:
@@ -16,9 +23,11 @@ spec:
         {{- else if eq .destinationType "multus" }}
         type: multus
         name: {{ required "networkMap.destinationName is required when destinationType=multus" .destinationName | quote }}
-        {{- with .destinationNamespace }}
-        namespace: {{ . | quote }}
+        {{- $destinationNamespace := .destinationNamespace | default $releaseNamespace }}
+        {{- if $tenantScoped }}
+        {{- $destinationNamespace = $releaseNamespace }}
         {{- end }}
+        namespace: {{ $destinationNamespace | quote }}
         {{- else }}
         {{- fail (printf "networkMap.destinationType must be 'pod' or 'multus', got %q" .destinationType) }}
         {{- end }}

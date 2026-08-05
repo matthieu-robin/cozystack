@@ -54,7 +54,7 @@ instanceProfile: ""
 ## @field {string} sourceId - The managed object reference ID of the source network in vSphere.
 ## @field {string} destinationType - Destination type: `pod` for pod network, or `multus` for a Multus network.
 ## @field {string} [destinationName] - Name of the destination network (required if type is `multus`).
-## @field {string} [destinationNamespace] - Namespace of the destination network.
+## @field {string} [destinationNamespace] - Namespace of the destination network. Only honored when this VMImport is deployed in a privileged (non-`tenant-*`) namespace; a VMImport deployed inside a tenant namespace is confined to its own namespace, so a tenant cannot attach the imported VM to another tenant's network.
 
 ## @param {[]NetworkMapEntry} networkMap - Mapping of source networks to destination networks.
 networkMap: []

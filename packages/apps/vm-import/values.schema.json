@@ -94,7 +94,7 @@
             "type": "string"
           },
           "destinationNamespace": {
-            "description": "Namespace of the destination network.",
+            "description": "Namespace of the destination network. Only honored when this VMImport is deployed in a privileged (non-`tenant-*`) namespace; a VMImport deployed inside a tenant namespace is confined to its own namespace, so a tenant cannot attach the imported VM to another tenant's network.",
             "type": "string"
           },
           "destinationType": {
