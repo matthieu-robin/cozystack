@@ -1,0 +1,157 @@
+# General Technical Review - Cozystack / Incubation
+
+- **Project:** Cozystack
+- **Project Version:** v1.x (current stable line; latest documented release v1.6 — see [SECURITY.md](https://github.com/cozystack/cozystack/blob/main/SECURITY.md) supported-versions table). `[maintainers: pin the exact release tag being submitted]`
+- **Website:** https://cozystack.io
+- **Date Updated:** 2026-08-06
+- **Template Version:** v1.0
+- **Description:** Cozystack is a free, Apache-2.0 open-source platform and framework for building clouds. It turns a set of bare-metal servers into a system with a native Kubernetes REST API for spawning Kubernetes clusters, Databases-as-a-Service, virtual machines, load balancers, HTTP-caching and other services. It is a CNCF Sandbox project and a Certified Kubernetes distribution.
+
+> **Status: DRAFT — work in progress.** This questionnaire is being actively completed and reviewed; roughly seven items still require maintainer input (marked inline as `[maintainers: confirm]`) and version-specific links/tags should be pinned before it is treated as final. It is kept in-repo as a living document per the template guidance.
+>
+> Notes for reviewers: answers cover **Day 0** and **Day 1** (required for Incubation, cumulative) plus **Day 2** where it already applies. Doc links are pinned to the versioned `/docs/v1.6/` tree; repo links are on `main` and should be pinned to the submitted tag before final submission. Items only the maintainers can quantify (formal load-test numbers, published SLOs, exact SBOM/SLSA status, security-team rotation policy) are marked `[maintainers: confirm]`.
+
+---
+
+## Day 0 - Planning Phase
+
+### Scope
+
+* **Roadmap / scope / maintainer ladder.** Scope for mid-to-long-term features is managed in the open on the public [GitHub Project board](https://github.com/orgs/cozystack/projects/1), GitHub Issues/Discussions, the CNCF Slack `#cozystack` channel, Telegram, and the regular Cozystack community meetings. Roles and decision-making are defined in [GOVERNANCE.md](https://github.com/cozystack/cozystack/blob/main/GOVERNANCE.md): four roles — **Users, Contributors, Directors, Maintainers** — decide by consensus, falling back to a simple-majority vote (one vote per Maintainer and Director). The promotion path is defined in [CONTRIBUTOR_LADDER.md](https://github.com/cozystack/cozystack/blob/main/CONTRIBUTOR_LADDER.md): **Community Participant → Contributor → Reviewer → Maintainer**, with concrete criteria (Reviewer: ≥15 PRs/yr, ≥20 reviews, ≥6 months, two sponsors from different employers; Maintainer: ≥6 months as Reviewer, ≥10 h/month), promotions done via PRs to `OWNERS`/`MAINTAINERS.md`.
+* **Target personas.** (1) Platform/infrastructure engineers and SRE/DevOps teams building private or public clouds; (2) service providers / hosting companies / data centers offering IaaS, DBaaS and Managed-Kubernetes; (3) enterprises consolidating workloads on bare metal and seeking a self-hosted public-cloud alternative or a VMware replacement.
+* **Primary use case.** Turn bare-metal servers into a multi-tenant cloud exposing a Kubernetes-native REST API for self-service provisioning of tenant Kubernetes clusters, VMs, managed databases, load balancers and caching.
+* **Additional use cases.** Private/hybrid cloud; managed-services platform for providers; dev/test environments; AI-ready GPU infrastructure; on-prem VMware/vSphere replacement.
+* **Explicitly unsupported.** Cozystack is a **full distribution that owns the cluster and the nodes** (Talos-based) — it is not an add-on installed into an existing, externally-managed production Kubernetes cluster, is not a public-cloud managed-Kubernetes add-on, requires **a minimum of 3 servers**, and targets **x86_64** (no Windows nodes). Single-node/2-node production is discouraged.
+* **Organizations that benefit.** Hosting/cloud providers, data centers, telcos, financial services, and any platform-engineering organization needing sovereign, self-hosted cloud infrastructure.
+* **End-user research.** Public adopters are listed in [ADOPTERS.md](https://github.com/cozystack/cozystack/blob/main/ADOPTERS.md). `[maintainers: link any published case studies / end-user survey results]`
+
+### Usability
+
+* **How personas interact.** Administrators install and operate the **management cluster**; tenants/users interact declaratively via the Kubernetes API (`kubectl apply` of Cozystack application resources such as `Kubernetes`, `VMInstance`, `Postgres`, `Bucket`, `Tenant`, …), via the web dashboard, or via any Kubernetes-compatible tooling/CI, because every object is a native Kubernetes resource.
+* **UX/UI.** Primary interface is the **Kubernetes API** surfaced through Cozystack's aggregated API layer (see API Design), so standard Kubernetes UX applies (kubectl, GitOps, client libraries). A **web dashboard** provides self-service creation/monitoring of applications and tenants, and shipped **Grafana** dashboards provide observability.
+* **Integration in production.** Applications are Kubernetes CRs backed by Helm releases reconciled by **Flux CD**, so Cozystack integrates natively with GitOps pipelines, CI/CD and any operator ecosystem. Tenant Kubernetes clusters are standard **Certified Kubernetes** clusters usable with the entire CNCF landscape. Federated auth via **Keycloak** (OIDC/SAML) — see [OIDC docs](https://cozystack.io/docs/v1.6/operations/oidc/).
+
+### Design
+
+* **Design principles / best practices.** Everything-is-a-Kubernetes-resource (infra, services and apps modeled uniformly as CRs and reconciled by controllers via GitOps); immutable infrastructure (**Talos Linux**, no SSH/no shell on nodes); composition of established CNCF/upstream building blocks rather than re-implementation; secure-by-default multi-tenancy (namespace/`Tenant` isolation, network policies, isolated tenant API servers); declarative, versioned Helm-based packaging.
+* **Architecture requirements & environments.** A **management cluster** (the platform) provisions **tenant clusters** (Kubernetes-in-Kubernetes: **Kamaji** runs tenant control planes as pods, **Cluster API** with Kamaji + KubeVirt providers manages lifecycle, worker nodes/VMs on **KubeVirt**). Hardware tiers ([hardware-requirements](https://cozystack.io/docs/v1.6/install/hardware-requirements/)): **Minimal/PoC** 3 nodes × 8 cores / 24 GB / 50 GB + 256 GB SSD / 1 Gbps (1–2 tenants, ≤3 clusters); **Small production** 3 nodes × 16–32 cores / 64 GB / 100 GB + 1–2 TB (5–10 tenants); **Large production** 6+ nodes × 32–64 cores / 128–256 GB / 200 GB + 4–10 TB NVMe / 10 Gbps (20+ tenants). Low latency between nodes is required; VM-based nodes need nested virtualization and CPU model `host`.
+* **In-cluster service dependencies.** Full platform stack ([platform-stack](https://cozystack.io/docs/v1.6/guides/platform-stack/)): Talos Linux, Kubernetes; **networking** Cilium (eBPF CNI + NetworkPolicy), Kube-OVN (VPC isolation, floating IPs, tenant segmentation), MetalLB, ingress-nginx, Multus CNI, CoreDNS, ExternalDNS, Kilo (WireGuard mesh); **virtualization** KubeVirt + CDI; **storage** LINSTOR/DRBD via Piraeus, SeaweedFS (object/Bucket), Velero (backup/restore), CSI Driver NFS; **GitOps/automation** Flux, Aenix etcd Operator (dedicated etcd for tenant control planes), cert-manager, External Secrets Operator; **observability** VictoriaMetrics + VictoriaLogs, Grafana, Alerta, VMAgent, Fluent Bit, kube-state-metrics, node-exporter; **autoscaling** Vertical Pod Autoscaler, Cluster Autoscaler; **databases** PostgreSQL, MariaDB, MongoDB (Percona), ClickHouse, OpenSearch, Qdrant, FoundationDB, Redis; **messaging** Kafka (Strimzi), NATS, RabbitMQ; **identity/registry** Keycloak, Harbor, OpenBao.
+* **Identity & Access Management.** Kubernetes-native **RBAC** end-to-end; multi-tenancy via the `Tenant` resource with per-tenant namespaces, scoped RoleBindings, NetworkPolicies and quotas; each tenant Kubernetes cluster has a fully isolated API server (separate **Kamaji** control plane + dedicated etcd). Federated SSO via **Keycloak** (OIDC/SAML). Secrets integration via **External Secrets Operator** and **OpenBao** (PKI/dynamic secrets).
+* **Sovereignty.** Fully self-hosted on the operator's own hardware; no dependency on any public cloud or external SaaS control plane — all data and control planes remain on-premises. This is a core design goal.
+* **Compliance.** Apache-2.0; ships a Security Self-Assessment (see Security) and OpenSSF Best Practices + Scorecard. Cozystack provides isolation/RBAC/audit/network-policy/PKI primitives adopters use to build compliant platforms rather than claiming formal certifications itself. `[maintainers: list any published compliance mappings]`
+* **High Availability.** Management control plane HA (≥3 nodes, dedicated etcd); tenant control planes (Kamaji) run as replicated pods and reschedule on failure; storage synchronously replicated (DRBD, 2–3 replicas); MetalLB failover for LB IPs; ingress replicated.
+* **Resource requirements (CPU/Network/Memory).** See hardware tiers above — from 3 × (8 cores / 24 GB) minimal to 6+ × (32–64 cores / 128–256 GB) at scale; 1 Gbps minimum, 10 Gbps recommended for production.
+* **Storage requirements.** **Persistent** replicated block storage (LINSTOR/DRBD via Piraeus) for stateful workloads (DB and VM disks) and **object storage** (SeaweedFS, S3-compatible) for the Bucket service/backups; **Velero** for backup/restore; **CSI Driver NFS** for NFS-backed volumes. Nodes need a dedicated raw secondary disk for LINSTOR (single-disk is possible but discouraged).
+* **API Design:**
+  * **Topology & conventions.** Cozystack exposes applications through a **Kubernetes API-aggregation layer**: a dynamically-generated aggregated API server surfaces each Cozystack "application" as a first-class, namespaced Kubernetes resource under Cozystack API groups (`apps.cozystack.io`), each backed by an **ApplicationDefinition** and a Helm chart/HelmRelease reconciled by Flux. Conventions follow Kubernetes API machinery (group/version/kind, spec/status). Reference: [REST API](https://cozystack.io/docs/v1.6/cozystack-api/rest/), [Go Types](https://cozystack.io/docs/v1.6/cozystack-api/go-types/), [ApplicationDefinition](https://cozystack.io/docs/v1.6/cozystack-api/application-definitions/); background: blog "How we built a dynamic Kubernetes API server for the API aggregation layer in Cozystack".
+  * **Defaults.** Secure/production-oriented defaults: RBAC on, per-tenant isolation, network policies, replicated storage, sane per-app sizing overridable via the resource spec.
+  * **Additional configuration.** Cluster-wide settings via the `cozystack` ConfigMap (bundle/variant, pod/service CIDRs, root host, API endpoint, storage) plus a MetalLB address pool; per-app tuning via the resource spec.
+  * **New/changed API types & cloud-provider calls.** Introduces its own CRDs/aggregated types (`apps.cozystack.io`, `Tenant`, per-service kinds). Makes **no external cloud-provider API calls** — everything is on-prem.
+  * **Compatibility with the Kubernetes API server.** Integrates via standard Kubernetes API-aggregation (APIService); does not fork/modify core kube-apiserver; tenant clusters run upstream **Certified Kubernetes**.
+  * **Versioning & breaking changes.** API groups versioned per Kubernetes conventions; breaking changes gated via release notes/deprecation windows. `[maintainers: confirm and link the API stability/deprecation policy]`
+* **Release process.** Semantic Versioning; releases on GitHub (stable `vX.Y.0`, patch `vX.Y.Z`). Artifacts are container images and Helm charts distributed via OCI (`ghcr.io/cozystack/cozystack`). Component versions are pinned per Cozystack release so an upgrade is a single coordinated bump. Only Stable/Patch releases are recommended in production (avoid alpha/beta/rc).
+
+### Installation
+
+* **How it is installed/initialized.** (1) Provision bare-metal (or nested-virt) nodes with **Talos Linux** (PXE/ISO) and bootstrap a management Kubernetes cluster ([Talos install](https://cozystack.io/docs/v1.6/install/talos/), [Kubernetes install](https://cozystack.io/docs/v1.6/install/kubernetes/)). (2) Install Cozystack on that cluster in one of two modes ([install](https://cozystack.io/docs/v1.6/install/cozystack/)): **As a Platform** (pick a variant such as `isp-full`; Cozystack installs and configures all components) or **BYOP** (install the operator with the `default` variant that provides the package registry `PackageSources`, then use the `cozypkg` CLI). The operator is delivered as an OCI Helm chart: `helm ... oci://ghcr.io/cozystack/cozystack/cozy-installer`. (3) Configure via the `cozystack` ConfigMap (variant, pod/service CIDRs, root host, API endpoint, storage) and create a MetalLB IP pool.
+* **How an adopter tests/validates.** Verify nodes Ready (`kubectl get node`), all platform HelmReleases reconciled (`kubectl get hr -A` — none failing), core pods Running, the aggregated API responds and the dashboard is reachable; then smoke-test by provisioning a sample tenant/app (e.g. a small `Kubernetes` cluster or `Postgres`) to `Ready`. Tenant clusters can be validated with upstream conformance (Sonobuoy) since Cozystack is Certified Kubernetes.
+
+### Security
+
+* **Security self-assessment.** Cozystack has completed a **Security Self-Assessment** submitted with the Incubation application ([cncf/toc#1916](https://github.com/cncf/toc/issues/1916)), reviewed with TAG Security. `[maintainers: link the versioned SSA document in the repo / tag-security assessments]`
+* **Cloud Native Security Tenets.**
+  * *How satisfied:* secure-by-default (RBAC, per-tenant NetworkPolicies, isolated tenant API servers, immutable Talos nodes with no SSH/shell, minimal host attack surface); defense-in-depth via network segmentation (Cilium/Kube-OVN); automated TLS via **cert-manager**; secret management via **External Secrets Operator**/**OpenBao**; least-privilege service accounts for controllers; supply-chain hygiene via **CodeQL** and **OpenSSF Scorecard**.
+  * *Loosening defaults:* adopters can relax tenant isolation (shared/flat networking), disable specific NetworkPolicies, or grant broader RBAC for single-tenant/lab use. `[maintainers: link docs on loosening tenant-isolation/network-policy defaults]`
+* **Security Hygiene.**
+  * Practices ([SECURITY.md](https://github.com/cozystack/cozystack/blob/main/SECURITY.md)): GitHub review with required approvals; CI on every PR; **CodeQL** static analysis on PRs and weekly (blocks merge on new error-severity alerts); **OpenSSF Scorecard** weekly (published at scorecard.dev); OpenSSF Best Practices badge; component versions pinned per release.
+  * Unmaintained-feature risk: components are curated and version-pinned per release; the Helm-packaged, swappable building-block design makes replacing a risky/unmaintainable component tractable. `[maintainers: describe the formal process for retiring/replacing a risky component]`
+* **Cloud Native Threat Modeling.**
+  * *Least privilege:* controllers run with scoped RBAC; elevated privileges are limited to and documented for infrastructure components that genuinely need them (KubeVirt/CDI for virtualization, Piraeus/LINSTOR for block devices, Cilium/Kube-OVN for CNI). `[maintainers: link a privileges/threat-model doc if published]`
+  * *Certificate rotation:* automated via **cert-manager** (issuance/renewal/rotation) for platform TLS; Talos/Kubernetes-managed PKI for cluster components; tenant control-plane certs managed by **Kamaji**.
+  * *Secure software supply chain:* **in place today** — CodeQL SAST + OpenSSF Scorecard + pinned dependencies + private vulnerability reporting with defined CVSS response targets. **On the roadmap / not yet:** signed release artifacts (cosign), SBOMs, SLSA provenance. `[maintainers: confirm current signing/SBOM/SLSA status and link the supply-chain roadmap items on the GitHub Project board]`
+
+---
+
+## Day 1 - Installation and Deployment Phase
+
+### Project Installation and Configuration
+
+* As in Day 0 → Installation: Talos-based management cluster, then Cozystack via **Platform** or **BYOP** mode (OCI Helm installer + `cozystack` ConfigMap + MetalLB pool). All subsequent configuration is declarative (Kubernetes resources / Flux-managed HelmReleases); Day-2 changes are made by editing resources, not imperative steps.
+
+### Project Enablement and Rollback
+
+* **Enable/disable in a live cluster.** Cozystack is the distribution rather than an add-on toggled inside a foreign cluster, so "enablement" = installing the operator bundle on the management cluster. Individual bundles/components and each tenant application are enabled/removed independently (create/delete the corresponding resource); removing a tenant application affects only that tenant, with no downtime to unrelated workloads. `[maintainers: confirm whether any core component change requires control-plane restart]`
+* **How enablement changes default cluster behavior.** Installing Cozystack sets the CNI (Cilium/Kube-OVN), default StorageClass (LINSTOR), ingress, cert-manager, and the aggregated API as cluster defaults for subsequently created workloads. Cozystack expects to own the cluster, so a clean install does not disturb pre-existing unrelated workloads.
+* **Testing enablement/disablement.** CI installs Cozystack end-to-end in ephemeral environments and provisions/destroys sample tenants and applications to validate create→ready→delete flows. `[maintainers: link the e2e/CI workflow]`
+* **Resource cleanup incl. CRDs.** Deleting an application resource triggers Flux/Helm to remove its HelmRelease and owned objects; finalizers ensure dependent resources (PVCs, VM disks, LB IPs) are released. `[maintainers: confirm CRD-cleanup behavior on full uninstall and any manual steps]`
+
+### Rollout, Upgrade and Rollback Planning
+
+* **Compatibility with Kubernetes & frequency.** Cozystack ships a curated, tested Kubernetes version per release; tenant clusters are Certified Kubernetes following upstream skew/support. Platform upgrades are delivered as new Cozystack releases; supported versions are tracked in [SECURITY.md](https://github.com/cozystack/cozystack/blob/main/SECURITY.md) (currently the v1.x line, with security fixes for v1.0.x and critical-only for v0.41.x).
+* **Upgrade procedure** ([upgrade docs](https://cozystack.io/docs/v1.6/operations/cluster/upgrade/)): run the troubleshooting/health checklist; annotate the `cozy-system` namespace and `cozystack-version` ConfigMap with `helm.sh/resource-policy=keep`; `helm upgrade cozystack oci://ghcr.io/cozystack/cozystack/cozy-installer --version X.Y.Z` (**do not** use `--reuse-values` — the chart pins OCI repo/package versions); verify pods and `kubectl get hr -A`.
+* **Rollback.** GitOps/Helm-managed with versioned releases; roll back by targeting the previous release (previous HelmRelease revisions) via the same mechanism. Stateful data (databases, VM disks) persists on replicated storage across control-plane rollbacks. `[maintainers: confirm a documented rollback runbook / version-skip constraints]`
+* **How a rollout/rollback can fail & impact.** Risks: incompatible CRD schema change, storage/CNI component upgrades requiring Talos node reboots, or a database-operator major bump. Impact is scoped to the component; running tenant workloads generally continue, though storage/CNI upgrades can transiently affect networking or volume attachment during node rolls. `[maintainers: confirm whether upgrades trigger Talos node reboots]`
+* **Metrics that should inform a rollback.** Control-plane/API availability & latency, Flux reconciliation failures (`kubectl get hr -A | grep -v True`), DRBD/LINSTOR replication health (`linstor resource list --faulty`), CNI/pod-networking errors, tenant application readiness.
+* **Upgrade/rollback testing (upgrade→downgrade→upgrade).** `[maintainers: describe the CI matrix testing N-1→N upgrades and the downgrade path; link results]`
+* **Deprecations/removals communication.** Release notes/CHANGELOG, GitHub release announcements, docs and community channels; API deprecations follow Kubernetes-style windows. `[maintainers: link the deprecation policy]`
+* **Alpha/beta capabilities in a rollout.** Experimental bundles/apps are opt-in and marked as such; only Stable/Patch releases are recommended for production. `[maintainers: confirm how alpha/beta features are flagged per application]`
+
+---
+
+## Day 2 - Day-to-Day Operations Phase
+
+### Scalability/Reliability
+
+* **Increasing size/count of API objects.** Scale horizontally by adding Talos nodes and by creating more tenants/applications (each an independent set of Flux-reconciled Kubernetes objects); storage scales by adding disks/nodes to the LINSTOR pool; **Cluster Autoscaler** and **Vertical Pod Autoscaler** assist node/pod right-sizing.
+* **SLOs/SLIs.** `[maintainers: state whether the project publishes reference SLOs/SLIs for the management API, tenant control-plane availability and storage, or note that SLOs are adopter-defined and list the SLIs exposed]`
+* **Operations increasing in time under existing SLIs.** Provisioning large tenant clusters, VM live-migration, and DRBD full-resync after node replacement scale with size/data volume. `[maintainers: confirm]`
+* **Resource-usage increase from enabling the project.** Platform components (Cilium, Kube-OVN, KubeVirt/CDI, LINSTOR, VictoriaMetrics/VictoriaLogs, Flux, DBaaS operators) consume a baseline on the management cluster; VM/DB workloads dominate at scale. The hardware tiers above bound expected footprints. `[maintainers: provide measured baseline overhead of platform components]`
+* **Conditions causing node-resource exhaustion.** Many VMs/pods per node (PIDs, sockets, hugepages), inodes on storage nodes, DRBD/LINSTOR memory under heavy replication, conntrack under high connection counts. Quotas/limits, VPA and MetalLB/ingress sizing mitigate. `[maintainers: confirm]`
+* **Load testing performed & results.** `[maintainers: summarize scale/load tests — nodes, tenants, VMs, DB throughput — and link results; known gap to fill for Incubation DD]`
+* **Recommended limits & how obtained.** Indicative per-tier limits are published in the hardware requirements (e.g. large-production ≈ 20+ tenants, dozens of clusters, hundreds of VMs/DBs on 6+ nodes). `[maintainers: provide tested maximums (nodes, tenants, VMs, PVs) and methodology]`
+* **Resilience patterns.** Controller reconcile loops with retries/back-off (Kubernetes/Flux), synchronous storage replication (DRBD), leader election, health probes and automatic rescheduling, MetalLB failover, cert-manager auto-renewal. `[maintainers: note any explicit circuit-breaker usage, e.g. at ingress]`
+
+### Observability Requirements
+
+* **Signals produced** ([monitoring docs](https://cozystack.io/docs/v1.6/operations/services/monitoring/)): metrics via **VictoriaMetrics (VMCluster)** collected by **VMAgent** (Prometheus-compatible); logs via **VictoriaLogs (VLogs)** collected by **Fluent Bit** (DaemonSet); dashboards via **Grafana**; alerting via **Alerta**; plus **kube-state-metrics** and **node-exporter**. Kubernetes events and component logs in standard formats.
+* **Audit logging.** Kubernetes API audit logging can be enabled on management and tenant control planes (standard kube-apiserver audit policy). `[maintainers: confirm any default audit policy shipped]`
+* **Dashboards.** Pre-built Grafana dashboards for cluster overview, node metrics, storage, KubeVirt/VMs and per-application health, plus user-created dashboards (Grafana Operator manages dashboards as CRDs).
+* **Cost/FinOps surfacing.** Per-tenant/per-application resource usage is observable via metrics and Kubernetes resource accounting (chargeback/showback), integrating with provider billing/portal. `[maintainers: link any FinOps/billing integration]`
+* **Health parameters.** Control-plane/API availability, Flux reconciliation status, Talos/node health, DRBD replication state, pod/VM readiness, ingress/LB health.
+* **Determining the project is in use.** Presence of Cozystack CRDs/aggregated APIs (`apps.cozystack.io`) and reconciled platform HelmReleases; existence of `Tenant`/application resources.
+* **Knowing it works for your instance.** Dashboards green; all HelmReleases `Ready`; sample tenant/app provisions successfully; storage replication healthy.
+* **Per-tenant monitoring.** Tenant workloads connect custom exporters via `VMServiceScrape`/`VMPodScrape`.
+
+### Dependencies
+
+* **Running services depended on.** As listed in Day 0 → in-cluster service dependencies (full platform stack).
+* **Dependency lifecycle policy.** Component versions are pinned and shipped per Cozystack release; upgrades are curated and tested together and bumped as a single coordinated release. `[maintainers: link the policy/process for tracking upstream component versions, e.g. renovate config]`
+* **Source Composition Analysis (SCA).** Static analysis via **CodeQL** (PRs + weekly, gating merges) and supply-chain posture via **OpenSSF Scorecard** (weekly). `[maintainers: confirm any dependency/image SCA scanner (e.g. Trivy/Grype) and where results are tracked]`
+* **Acting on SCA & timescale.** Vulnerability response targets are defined in SECURITY.md (Critical ≈14 days, High ≈30 days, Medium ≈90 days, Low next release; acknowledgement ≤3 business days, triage ≤7). `[maintainers: confirm the same SLA applies to CVEs in bundled upstream components and how fixes ship]`
+
+### Troubleshooting
+
+* **Recovery when a key component fails** ([troubleshooting](https://cozystack.io/docs/v1.6/operations/troubleshooting/)): Kubernetes/etcd HA and Talos self-healing recover control-plane node loss; **Kamaji** reschedules tenant control planes; **DRBD/LINSTOR** promotes a healthy replica; **Flux** re-reconciles drifted/removed platform objects; databases recover via their operators; **Velero** provides backup/restore. Diagnostics: `kubectl get node`; `kubectl get hr -A | grep -v True`; `kubectl get pod -A | grep -v 'Running\|Completed'`; `linstor node/storage-pool/resource list [--faulty]`; operator logs `kubectl logs -n cozy-system deploy/cozystack-operator`; dedicated guides for [etcd](https://cozystack.io/docs/v1.6/operations/troubleshooting/etcd/), [Flux CD](https://cozystack.io/docs/v1.6/operations/troubleshooting/flux-cd/) and [Kube-OVN](https://cozystack.io/docs/v1.6/operations/troubleshooting/kube-ovn/).
+* **Known failure modes.** Documented areas include broken HelmReleases (`DependenciesNotReady` when a required package is disabled/missing), LINSTOR/DRBD faulty resources, Kube-OVN OVN-database corruption (recover via `ovn-appctl` procedures), and etcd quorum issues — each with a dedicated troubleshooting guide. `[maintainers: consolidate a "known failure modes + mitigations" list if not already published]`
+
+### Compliance
+
+* **Third-party attribution & license notices.** Apache-2.0 project bundling third-party components under their own licenses; notices retained per component. `[maintainers: confirm LICENSE + third-party NOTICE handling]`
+* **Alignment with CNCF attribution recommendations.**
+  * *Notices for third-party code in source files:* retained in-file / in `LICENSE`/`NOTICE`. `[maintainers: confirm]`
+  * *Notices for unmodified third-party components in the repo:* retained alongside the pinned component. `[maintainers: confirm]`
+  * *Notices in distributed build artifacts (images/binaries):* `[maintainers: describe how license notices/SBOM are included in container images]`
+
+### Security
+
+* **Access control execution.** Kubernetes RBAC end-to-end; per-tenant namespaces, RoleBindings, quotas and NetworkPolicies; isolated tenant API servers (Kamaji + dedicated etcd); Keycloak OIDC/SAML for federated auth; secrets via External Secrets Operator / OpenBao.
+* **Security reporting team & rotation.** Reporting via **GitHub Private Vulnerability Reporting** ([advisories/new](https://github.com/cozystack/cozystack/security/advisories/new)) or a private maintainer contact; any maintainer can receive and route a report. Current security response team: **@kvaps, @lexfrei, @tym83, @matthieu-robin, @mattia-eleuteri**. `[maintainers: describe how security-team membership reflects community/organizational diversity and how members are invited/rotated — this rotation policy is not yet documented in SECURITY.md]`
+
+---
+
+### Appendix — sources
+- cozystack.io docs v1.6: [platform-stack](https://cozystack.io/docs/v1.6/guides/platform-stack/), [hardware-requirements](https://cozystack.io/docs/v1.6/install/hardware-requirements/), [install](https://cozystack.io/docs/v1.6/install/cozystack/), [upgrade](https://cozystack.io/docs/v1.6/operations/cluster/upgrade/), [monitoring](https://cozystack.io/docs/v1.6/operations/services/monitoring/), [troubleshooting](https://cozystack.io/docs/v1.6/operations/troubleshooting/), [OIDC](https://cozystack.io/docs/v1.6/operations/oidc/), [REST API](https://cozystack.io/docs/v1.6/cozystack-api/rest/).
+- Repo (main): [GOVERNANCE.md](https://github.com/cozystack/cozystack/blob/main/GOVERNANCE.md), [CONTRIBUTOR_LADDER.md](https://github.com/cozystack/cozystack/blob/main/CONTRIBUTOR_LADDER.md), [SECURITY.md](https://github.com/cozystack/cozystack/blob/main/SECURITY.md), [ADOPTERS.md](https://github.com/cozystack/cozystack/blob/main/ADOPTERS.md).
+- Roadmap: [GitHub Project board](https://github.com/orgs/cozystack/projects/1).
+- SSA / Incubation: [cncf/toc#1916](https://github.com/cncf/toc/issues/1916).
+- GTR template: cncf/toc `toc_subprojects/project-reviews-subproject/general-technical-questions.md` v1.0.
