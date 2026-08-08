@@ -192,6 +192,26 @@ otherwise it hangs at the SeaBIOS `Booting from Hard Disk...` prompt. The
 **[cozystack/cozystack#3002](https://github.com/cozystack/cozystack/pull/3002)**;
 this migration feature depends on it for UEFI sources.
 
+### 3.7 vCenter and ESXi privileges
+
+Do not use a vCenter Administrator account. Forklift documents a minimal privilege set that is sufficient to migrate, and the examples in this repository name a dedicated account (`mtv-migration@vsphere.local`) rather than `administrator@vsphere.local` for that reason. A migration credential ends up in a Kubernetes Secret read by the cluster-privileged Forklift controller, so its blast radius is whatever that vCenter account can do — which is the whole argument for scoping it down.
+
+A read-only account is **not** sufficient, because three things a migration does are writes:
+
+- **Reading disks through the VDDK** needs `VirtualMachine.Provisioning.DiskRandomRead`, which opens a disk for reading via the SDK. It sits under *Provisioning*, not under plain inventory read.
+- **Cold migration powers the source VM off** at cutover, so a power-off interaction privilege is required.
+- **Warm migration** (`warm: true`) needs Changed Block Tracking enabled on the VMs and their disks, and creates then removes a snapshot on every incremental pass.
+
+Only inventory collection — what populates the `Plan` — is genuinely read-only. A read-only account therefore lets Forklift *list* the VMs and then fails at transfer time, which is a confusing way to discover the problem.
+
+Grant the permissions **at the datacenter level and propagate them to child objects**, so the datastores, networks and switches the VM uses are covered. Scope them to the datacenter in play rather than the whole vCenter, and disable the account once the migration campaign is over.
+
+The authoritative list of privileges is the *Prerequisites* chapter of the Forklift/MTV documentation — consult it rather than reconstructing the set from this page, and check it against the Forklift release pinned in `packages/system/forklift-operator`:
+
+- [MTV — Prerequisites](https://docs.redhat.com/en/documentation/migration_toolkit_for_virtualization/2.7/html/installing_and_using_the_migration_toolkit_for_virtualization/prerequisites_mtv)
+
+`migrationHosts` (3.2) introduces a **second** set of credentials, against the ESXi hosts directly rather than vCenter, because the VDDK opens NFC connections to the hosts. The same reasoning applies: a dedicated host account, not `root`. Leave `insecureSkipVerify` at its default in production and supply the host thumbprint instead — setting it disables certificate verification on a connection that carries those credentials.
+
 ---
 
 ## 4. Risks

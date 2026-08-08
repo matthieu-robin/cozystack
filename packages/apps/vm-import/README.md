@@ -21,10 +21,12 @@ metadata:
   namespace: <your-namespace>
 type: Opaque
 stringData:
-  user: administrator@vsphere.local
+  user: mtv-migration@vsphere.local
   password: your-password
   thumbprint: AA:BB:CC:DD:...
 ```
+
+Use a dedicated vCenter account with the minimal privilege set Forklift documents, not an Administrator: this Secret is read by the cluster-privileged Forklift controller, so the account's reach is the credential's blast radius. A purely read-only account is not enough — reading disks through the VDDK, powering the source VM off at cutover, and the snapshots a warm migration takes are all writes. See [vCenter and ESXi privileges](./docs/MIGRATION_GUIDE.md#37-vcenter-and-esxi-privileges) in the migration guide.
 
 The `thumbprint` is the SHA-1 fingerprint of the vCenter SSL certificate. You can retrieve it with:
 
