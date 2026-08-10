@@ -213,6 +213,53 @@ func TestAdoptVMViaVMDisksReplaysDeleteWhenVMInstanceExists(t *testing.T) {
 	}
 }
 
+// Plans are resolved cluster-wide by UID, so an unindexed lookup costs a List
+// of every Plan in the cluster per candidate VM, on every 15s tick.
+func TestResolvePlanListsPlansOncePerPass(t *testing.T) {
+	plan := newForkliftObj("Plan", "tenant-a", "import-1", "uid-1", nil)
+	_ = unstructured.SetNestedSlice(plan.Object, []interface{}{
+		map[string]interface{}{"id": "vm-100"},
+	}, "spec", "vms")
+
+	client := fakeClient(
+		plan,
+		newMigration("tenant-a", "import-1", true),
+		newVM("tenant-a", "web-1", map[string]string{"plan": "uid-1", "vmID": "vm-100"}),
+		newVM("tenant-a", "web-2", map[string]string{"plan": "uid-1", "vmID": "vm-100"}),
+		newVM("tenant-a", "web-3", map[string]string{"plan": "uid-1", "vmID": "vm-100"}),
+	)
+	var planLists int
+	client.PrependReactor("list", "plans", func(k8stesting.Action) (bool, runtime.Object, error) {
+		planLists++
+		return false, nil, nil
+	})
+	c := &AdoptionController{
+		dynamicClient: client,
+		planCache:     make(map[string]*PlanCacheEntry),
+		recorder:      record.NewFakeRecorder(10),
+	}
+
+	vms, err := c.getForkliftVMs(context.Background())
+	if err != nil {
+		t.Fatalf("getForkliftVMs: %v", err)
+	}
+	if len(vms) != 3 {
+		t.Fatalf("got %d adoptable VMs, want 3", len(vms))
+	}
+	if planLists != 1 {
+		t.Errorf("listed Plans %d times for 3 VMs, want 1", planLists)
+	}
+
+	// A new pass must see Plans changed since the last one.
+	c.planIndex = nil
+	if _, err := c.getForkliftVMs(context.Background()); err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if planLists != 2 {
+		t.Errorf("listed Plans %d times over two passes, want 2", planLists)
+	}
+}
+
 func TestIsMigrationComplete(t *testing.T) {
 	cases := []struct {
 		name string

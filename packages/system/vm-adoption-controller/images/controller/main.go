@@ -154,6 +154,13 @@ type AdoptionController struct {
 	recorder      record.EventRecorder
 	planCache     map[string]*PlanCacheEntry
 	cacheMutex    sync.RWMutex
+
+	// planIndex resolves a Plan UID to its Plan for the duration of a single
+	// reconcile pass. Plans are searched cluster-wide, so without it every
+	// candidate VM costs a full List of every Plan in the cluster, twice —
+	// once to select the VM and once to adopt it. reconcile drops the index
+	// at the start of each pass so a Plan edited between ticks is picked up.
+	planIndex map[string]*unstructured.Unstructured
 }
 
 // vmRef builds an ObjectReference to a Forklift-imported VirtualMachine so the
@@ -199,6 +206,11 @@ func (c *AdoptionController) reconcile(ctx context.Context) {
 
 	// Purge expired cache entries
 	c.purgeExpiredCache()
+
+	// Drop the per-pass Plan index so this reconcile sees current Plans.
+	c.cacheMutex.Lock()
+	c.planIndex = nil
+	c.cacheMutex.Unlock()
 
 	// Get VirtualMachines with Forklift labels
 	vms, err := c.getForkliftVMs(ctx)
@@ -322,6 +334,26 @@ func (c *AdoptionController) getForkliftVMs(ctx context.Context) ([]kubevirtv1.V
 // ownership — see validateVMBelongsToPlan, which every caller must run before
 // deriving any authority from the returned Plan.
 func (c *AdoptionController) resolvePlan(ctx context.Context, planUID string) (*unstructured.Unstructured, bool) {
+	index, err := c.planIndexForPass(ctx)
+	if err != nil {
+		klog.V(2).Infof("Failed to list Plans: %v", err)
+		return nil, false
+	}
+	plan, ok := index[planUID]
+	return plan, ok
+}
+
+// planIndexForPass returns the UID→Plan index, building it from a single
+// cluster-wide List the first time it is needed in a reconcile pass. reconcile
+// invalidates it between passes.
+func (c *AdoptionController) planIndexForPass(ctx context.Context) (map[string]*unstructured.Unstructured, error) {
+	c.cacheMutex.RLock()
+	index := c.planIndex
+	c.cacheMutex.RUnlock()
+	if index != nil {
+		return index, nil
+	}
+
 	gvr := schema.GroupVersionResource{
 		Group:    "forklift.konveyor.io",
 		Version:  "v1beta1",
@@ -329,15 +361,18 @@ func (c *AdoptionController) resolvePlan(ctx context.Context, planUID string) (*
 	}
 	list, err := c.dynamicClient.Resource(gvr).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		klog.V(2).Infof("Failed to list Plans: %v", err)
-		return nil, false
+		return nil, err
 	}
+
+	index = make(map[string]*unstructured.Unstructured, len(list.Items))
 	for i := range list.Items {
-		if string(list.Items[i].GetUID()) == planUID {
-			return &list.Items[i], true
-		}
+		index[string(list.Items[i].GetUID())] = &list.Items[i]
 	}
-	return nil, false
+
+	c.cacheMutex.Lock()
+	c.planIndex = index
+	c.cacheMutex.Unlock()
+	return index, nil
 }
 
 // validateVMBelongsToPlan rejects a VirtualMachine whose adoption authority does
