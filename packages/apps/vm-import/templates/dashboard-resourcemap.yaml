@@ -17,10 +17,16 @@ rules:
   - migrations
   - networkmaps
   - storagemaps
+  - hosts
   resourceNames:
   - {{ .Release.Name }}
   - {{ .Release.Name }}-source
   - {{ .Release.Name }}-destination
+  {{- /* host.yaml names each Host <release>-<id>. resourceNames takes no
+         patterns, so enumerate the ids the release actually declares. */}}
+  {{- range .Values.migrationHosts }}
+  - {{ $.Release.Name }}-{{ .id }}
+  {{- end }}
   verbs: ["get", "list", "watch"]
 ---
 kind: RoleBinding

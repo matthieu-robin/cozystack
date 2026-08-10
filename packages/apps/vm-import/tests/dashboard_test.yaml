@@ -23,6 +23,22 @@ tests:
             name: tenant-vmlab-use
             apiGroup: rbac.authorization.k8s.io
 
+  - it: covers the Host objects a migrationHosts import creates
+    set:
+      migrationHosts:
+        - id: host-10
+          ipAddress: 192.0.2.10
+          secretName: esxi-creds
+    asserts:
+      - documentIndex: 0
+        contains:
+          path: rules[0].resources
+          content: hosts
+      - documentIndex: 0
+        contains:
+          path: rules[0].resourceNames
+          content: my-import-host-10
+
   - it: renders nothing for an admin-directed import in a privileged namespace
     release:
       name: my-import
