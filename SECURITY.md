@@ -8,21 +8,25 @@ Cozystack integrates and ships many upstream cloud native components. If you bel
 
 ## Supported Versions
 
-The Cozystack project maintains multiple release lines at once. Support is expressed below as a **rolling policy relative to the latest release** rather than as a list of version numbers, so that this table does not go stale between releases. To find which concrete lines the policy currently points at, read it against the GitHub Releases page:
+The Cozystack project maintains several release lines at once. Rather than list version numbers that go stale between releases, the table below states **an observable test** you can apply yourself against the GitHub Releases page:
 
 <https://github.com/cozystack/cozystack/releases>
+
+The test is *recent patch activity on the line*, not the existence of a `release-X.Y` branch — release branches are never deleted, so every line back to the earliest still has one and branch existence says nothing about whether the line is still being maintained.
 
 | Version line | Status | Notes |
 | --- | --- | --- |
 | Latest stable minor | Supported | Current stable release line. Security fixes land here first, and patch releases are cut from it. |
-| Any earlier `1.x` minor that still has an active `release-1.Y` branch | Supported | The project maintains several `1.x` lines in parallel and backports security and important maintenance fixes to them, so more than one line receives patch releases at any given time. Which lines are currently active is visible from the `release-1.Y` branches and from the patch releases on the Releases page. |
-| `1.x` minors whose release branch is no longer receiving patches | Limited support | Critical security and upgrade-blocking fixes may be backported at maintainer discretion. Adopters are encouraged to move to an actively patched line. |
-| `0.x` | Limited support | Pre-v1 lines from the v0 to v1 transition. Critical security and upgrade-blocking fixes may be backported at maintainer discretion; please plan an upgrade to a `1.x` line. |
+| Any earlier `1.x` minor with a patch release in the **last 6 months** | Supported | The project backports security and important maintenance fixes to several `1.x` lines in parallel, so more than one line is normally in this row. Check the Releases page: if the line has had a patch release within the last six months, it is being maintained. |
+| `1.x` minors with no patch release for **6 to 18 months** | Limited support | Critical security and upgrade-blocking fixes may be backported at maintainer discretion. Adopters are encouraged to move to a maintained line. |
+| `1.x` minors with no patch release for **over 18 months** | End of life | No fixes. Upgrade to a maintained line. |
+| `v0.41.x` | End of life | The final pre-v1 line. It received patch releases through March 2026 during the v0 to v1 transition and no longer does; no further fixes are planned. |
+| Everything before `v0.41` | Not supported | Long superseded. Upgrade to a `1.x` line. |
 | `alpha`, `beta`, `rc` releases | Not supported | Pre-release builds are for testing and evaluation only. |
 
-This table describes the support the project actually provides today; it is not a contractual guarantee of a fixed backport window, and the set of actively patched lines changes as releases are cut.
+This table describes the support the project provides in practice. It is not a contractual guarantee of a fixed backport window: the six- and eighteen-month marks are how we describe current behaviour so that adopters can determine their own status, not a commitment to patch any line for that long.
 
-Reporting a vulnerability against a line with limited support is still welcome. We will confirm whether the issue also affects an actively patched line and fix it there; whether the fix is additionally backported to the older line is a maintainer decision based on severity and upgrade impact.
+Reporting a vulnerability against a line with limited support or at end of life is still welcome. We will confirm whether the issue also affects a maintained line and fix it there; whether the fix is additionally backported to an older line is a maintainer decision based on severity and upgrade impact.
 
 ## Reporting a Vulnerability
 
@@ -105,7 +109,7 @@ Four automated controls run continuously against this repository and the artifac
 - **CodeQL** (static analysis). Runs on every pull request to `main`, on push to `main`, and on a weekly schedule. The Go database is built with CodeQL's `manual` build mode — each first-party module is compiled explicitly, so the analysis does not depend on the project `Makefile` (which fetches upstream tags) and stays reproducible. On a pull request CodeQL reports only alerts that are *new relative to `main`* and annotates them on the changed lines. New findings are expected to be resolved before merge — either by fixing the code, or, for a false positive or accepted risk, by dismissing the alert in the **Security → Code scanning** tab with a recorded reason (`False positive`, `Won't fix`, or `Used in tests`).
 - **OpenSSF Scorecard** (supply-chain posture). Runs weekly and on branch-protection changes, and publishes results to the public Scorecard API at <https://scorecard.dev/viewer/?uri=github.com/cozystack/cozystack>. Scorecard results are intentionally **not** uploaded to GitHub code scanning: it posts one alert per check, which would bury CodeQL's first-party findings. The scorecard.dev badge is the canonical view.
 
-- **zizmor** (GitHub Actions static analysis). Audits the workflow definitions themselves on pull requests and fails the check on findings such as unpinned action references or over-broad `permissions`. As with Scorecard, the SARIF is intentionally not uploaded to code scanning — the public signal is the failing check.
+- **zizmor** (GitHub Actions static analysis). Audits the workflow definitions themselves for findings such as unpinned action references or over-broad `permissions`. It runs in two places: as a hook inside the `pre-commit` check, which **is** a required status check and therefore blocks merge, and as a standalone workflow scoped to changes under `.github/` that is not itself a required check. As with Scorecard, the SARIF is intentionally not uploaded to code scanning — the signal is the failing check.
 - **Trivy** (dependency and container-image CVE scanning). An organization-wide pipeline scans every non-fork, non-archived repository in the `cozystack` organization: Go modules, Dockerfile base images and the container images referenced by the packaged charts, against NVD, vendor advisories and the GitHub Advisory Database. CRITICAL findings are scanned every 6 hours; HIGH, MEDIUM and LOW are collected into a weekly report. Findings are filtered for noise (dev and build-only dependencies, unfixed-upstream findings older than a year, already-triaged CVEs) and every remaining new finding becomes a tracked issue with a severity label and a triage checklist. Triage targets are tighter than the reported-vulnerability targets above: CRITICAL within 1 business day against a 7-day fix target, HIGH within 3 business days / 30 days, MEDIUM within 10 business days / 90 days, LOW within 30 days best-effort. Confirmed findings ship as a pinned-component bump in the next release, or as a patch release on an actively patched line when severity warrants it. Per-CVE findings and triage state are kept private until fixed, because they describe unfixed exposure in released artifacts; the pipeline's policy and aggregate reporting are intended to be public.
 
 Dependency updates are additionally automated by **Renovate** ([`.github/renovate.json`](.github/renovate.json)), which raises pull requests for Go modules, Dockerfile base images, GitHub Actions and a small number of regex-pinned references. The `helm-values` manager is disabled repo-wide, so the curated component images that make up the shipped platform are bumped by maintainers when preparing a release rather than by a bot.
@@ -124,7 +128,7 @@ Security fixes are published in normal release artifacts whenever possible. User
 
 The following are generally out of scope for private security reporting unless there is a clear Cozystack-specific impact:
 
-- vulnerabilities that reproduce only on an unsupported or end-of-life Cozystack version and not on any actively patched line — such reports are still accepted and triaged, but a fix will normally be delivered on an actively patched line rather than backported
+- vulnerabilities that reproduce only on an end-of-life or unsupported version and not on any maintained line — such reports are still accepted and triaged, but the fix will normally be delivered on a maintained line rather than backported
 - issues that require access already equivalent to cluster-admin, node root, or direct infrastructure administrator privileges, unless they bypass an expected Cozystack security boundary
 - vulnerabilities that exist only in an upstream dependency and are not introduced or materially worsened by Cozystack packaging, configuration, or defaults
 - requests for security best-practice advice without a concrete vulnerability
