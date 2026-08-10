@@ -91,6 +91,20 @@ the `seccompProfile: Unconfined` (or `CAP_SYS_ADMIN`) that `virt-v2v`'s
 run in a dedicated **privileged** system namespace, and the resulting VM is
 then adopted into the tenant.
 
+### 2.1 Cost of the two paths
+
+Measured end to end on a live lab from a clean reinstall, migrating a 16 GiB AlmaLinux 9 VM onto `replicated-async` (LINSTOR/DRBD, 3 replicas):
+
+| Step | virt-v2v + clone | VDDK direct-target |
+| --- | --- | --- |
+| Scheduling + initialize | ~33 s | ~30 s |
+| Disk transfer (16 GiB) | 2 m 02 s | 2 m 23 s |
+| VM creation by Forklift | 4 s | 3 s |
+| Cross-namespace clone (16 GiB) | **+2 m 52 s** | none |
+| **Total, data in tenant** | **≈ 5 m 46 s** | **≈ 2 m 55 s** |
+
+The cross-namespace clone is what separates them: it re-copies the whole disk a second time across replicated storage, so removing it roughly halves wall-clock. That is the argument for `skipGuestConversion` (3.5) when the guest already carries virtio drivers — the copy lands straight in the tenant and no clone is needed. It also means migration time scales with disk size twice over on the virt-v2v path, which is worth knowing before scheduling a cutover window around a large VM.
+
 ---
 
 ## 3. Prerequisites
