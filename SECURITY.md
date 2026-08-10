@@ -8,19 +8,19 @@ Cozystack integrates and ships many upstream cloud native components. If you bel
 
 ## Supported Versions
 
-As of March 17, 2026, the Cozystack project maintains multiple release lines. Security fixes are prioritized for the latest stable release line and, when needed, backported to other supported lines.
+The Cozystack project maintains multiple release lines at once. Support is expressed below as a **rolling policy relative to the latest release** rather than as a list of version numbers, so that this table does not go stale between releases. To find which concrete lines the policy currently points at, read it against the GitHub Releases page:
+
+<https://github.com/cozystack/cozystack/releases>
 
 | Version line | Status | Notes |
 | --- | --- | --- |
-| `v1.1.x` | Supported | Current stable release line. |
-| `v1.0.x` | Supported | Previous stable release line; receives security and important maintenance fixes. |
-| `v0.41.x` | Limited support | Legacy pre-v1 line during the v0 to v1 transition; critical security and upgrade-blocking fixes may be backported at maintainer discretion. |
-| `< v0.41` | Not supported | Please upgrade to a supported release line before requesting a security fix. |
+| Latest stable minor (`vX.Y.x`) | Supported | Current stable release line. Security fixes land here first, and patch releases are cut from it. |
+| Previous stable minor (`vX.(Y-1).x`) | Supported | Receives security and important maintenance fixes, backported from the current line. |
+| Older `v1.x` minors | Limited support | Critical security and upgrade-blocking fixes may be backported at maintainer discretion. Adopters are expected to move to a supported line. |
+| `v0.x` (including `v0.41.x`) | Not supported | Pre-v1 lines from the v0 to v1 transition. Please upgrade to a supported release line before requesting a security fix. |
 | `alpha`, `beta`, `rc` releases | Not supported | Pre-release builds are for testing and evaluation only. |
 
-Supported versions may change over time as new release lines are cut. The authoritative source for current releases is the GitHub Releases page:
-
-<https://github.com/cozystack/cozystack/releases>
+Reporting a vulnerability against an unsupported line is still welcome: we will confirm whether the issue also affects a supported line and fix it there.
 
 ## Reporting a Vulnerability
 
