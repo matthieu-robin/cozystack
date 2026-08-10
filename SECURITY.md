@@ -8,27 +8,24 @@ Cozystack integrates and ships many upstream cloud native components. If you bel
 
 ## Supported Versions
 
-The Cozystack project maintains several release lines at once. Rather than list version numbers that go stale between releases, the table below states **an observable test** you can apply yourself against the GitHub Releases page:
+The Cozystack project maintains three release lines at a time: **the latest stable minor and the two minors preceding it.** That is a rolling rule rather than a list of version numbers, so it does not go stale between releases — read it against the GitHub Releases page to see which concrete lines it currently names:
 
 <https://github.com/cozystack/cozystack/releases>
 
-The test is *recent patch activity on the line*, not the existence of a `release-X.Y` branch — release branches are never deleted, so every line back to the earliest still has one and branch existence says nothing about whether the line is still being maintained.
+Note that the rule is keyed to release lines, not to the existence of a `release-X.Y` branch. Release branches are never deleted, so every line back to the earliest still has one, and branch existence says nothing about whether a line is maintained.
 
 | Version line | Status | Notes |
 | --- | --- | --- |
 | Latest stable minor | Supported | Current stable release line. Security fixes land here first, and patch releases are cut from it. |
-| Any earlier `1.x` minor with a patch release in the **last 6 months** | Supported | The project backports security and important maintenance fixes to several `1.x` lines in parallel, so more than one line is normally in this row. Check the Releases page: if the line has had a patch release within the last six months, it is being maintained. |
-| `1.x` minors with no patch release for **6 to 18 months** | Limited support | Critical security and upgrade-blocking fixes may be backported at maintainer discretion. Adopters are encouraged to move to a maintained line. |
-| `1.x` minors with no patch release for **over 18 months** | End of life | No fixes. Upgrade to a maintained line. |
+| The two minors preceding the latest | Supported | Receive security and important maintenance fixes, backported from the current line. |
+| Older `1.x` minors | Limited support | Critical and upgrade-blocking fixes may be backported at maintainer discretion. Adopters are encouraged to move to a supported line. |
 | `v0.41.x` | End of life | The final pre-v1 line. It received patch releases through March 2026 during the v0 to v1 transition and no longer does; no further fixes are planned. |
 | Everything before `v0.41` | Not supported | Long superseded. Upgrade to a `1.x` line. |
 | `alpha`, `beta`, `rc` releases | Not supported | Pre-release builds are for testing and evaluation only. |
 
-This table describes the support the project provides in practice. It is not a contractual guarantee of a fixed backport window: the six- and eighteen-month marks are how we describe current behaviour so that adopters can determine their own status, not a commitment to patch any line for that long.
+Being in a supported row does not mean a line receives every fix. **The project does not have a documented rule for choosing which supported lines a given fix is backported to** — that decision is taken per fix by the maintainers, weighing severity against the risk and effort of the backport. This is stated rather than dressed up as a policy because no such policy exists; adopters who need a specific fix on a specific line should ask.
 
-Applied today, the activity test classifies every `1.x` line from `1.0` to `1.6` as supported, because each has had a patch release within six months. That is a wide set, and it is deliberate rather than accidental — the project cuts minors frequently and adopters do not all move at that pace. It does not mean every line receives every fix: whether a given fix is backported to a given supported line is a maintainer decision taken per fix, and the project does not currently document a rule for it. The lower rows of the table are therefore forward-looking today: no `1.x` line has yet gone six months without a patch.
-
-Reporting a vulnerability against a line with limited support or at end of life is still welcome. We will confirm whether the issue also affects a maintained line and fix it there; whether the fix is additionally backported to an older line is a maintainer decision taken per fix, on the same undocumented basis noted above.
+Reporting a vulnerability against a line with limited support or at end of life is still welcome. We will confirm whether the issue also affects a supported line and fix it there; whether the fix is additionally backported to the older line is a per-fix maintainer decision on the same basis.
 
 ## Reporting a Vulnerability
 
