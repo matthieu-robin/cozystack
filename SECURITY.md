@@ -28,7 +28,7 @@ This table describes the support the project provides in practice. It is not a c
 
 Applied today, the activity test classifies every `1.x` line from `1.0` to `1.6` as supported, because each has had a patch release within six months. That is a wide set, and it is deliberate rather than accidental — the project cuts minors frequently and adopters do not all move at that pace. It does not mean every line receives every fix: whether a given fix is backported to a given supported line is a maintainer decision taken per fix, and the project does not currently document a rule for it. The lower rows of the table are therefore forward-looking today: no `1.x` line has yet gone six months without a patch.
 
-Reporting a vulnerability against a line with limited support or at end of life is still welcome. We will confirm whether the issue also affects a maintained line and fix it there; whether the fix is additionally backported to an older line is a maintainer decision based on severity and upgrade impact.
+Reporting a vulnerability against a line with limited support or at end of life is still welcome. We will confirm whether the issue also affects a maintained line and fix it there; whether the fix is additionally backported to an older line is a maintainer decision taken per fix, on the same undocumented basis noted above.
 
 ## Reporting a Vulnerability
 
