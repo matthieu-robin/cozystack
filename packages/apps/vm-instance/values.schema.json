@@ -212,7 +212,13 @@
     },
     "fullnameOverride": {
       "description": "Override the VirtualMachine resource name. Used by vm-adoption-controller to match imported VM names.",
-      "type": "string"
+      "type": "string",
+      "x-kubernetes-validations": [
+        {
+          "rule": "self == oldSelf",
+          "message": "fullnameOverride is immutable"
+        }
+      ]
     }
   }
 }
