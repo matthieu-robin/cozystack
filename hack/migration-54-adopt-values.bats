@@ -50,7 +50,7 @@ prep() {
 {"items":[
   {"metadata":{"namespace":"tenant-test","name":"kubernetes-test3"},
    "spec":{"values":{
-     "nodeGroups":{"md0":{"minReplicas":1,"maxReplicas":3,"roles":["ingress-nginx"]}},
+     "nodeGroups":{"md0":{"minReplicas":1,"maxReplicas":3,"roles":["ingress-nginx"],"logSerialConsole":true}},
      "talos":{"version":"v1.13.0","schematicID":"deadbeef","imageFactoryURL":"https://factory.talos.dev","installerRepository":"factory.talos.dev/installer"},
      "version":"v1.32",
      "storageClass":"replicated",
@@ -89,6 +89,10 @@ JSON
   # Group fields and the storageClass cluster-level fallback carry through.
   [ "$(jq -r '.spec.values.minReplicas' "$FAKE_CHILD_HR")" = "1" ]
   [ "$(jq -r '.spec.values.roles[0]' "$FAKE_CHILD_HR")" = "ingress-nginx" ]
+  # logSerialConsole feeds the content-hashed KMT (nodegroup.yaml define), so
+  # dropping it on adoption would rename the KMT and roll every worker VM of the
+  # pool (and silently disable the setting); it must carry through.
+  [ "$(jq -r '.spec.values.logSerialConsole' "$FAKE_CHILD_HR")" = "true" ]
   [ "$(jq -r '.spec.values.storageClass' "$FAKE_CHILD_HR")" = "replicated" ]
   rm -rf "$WORK"
 }

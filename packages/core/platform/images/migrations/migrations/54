@@ -372,7 +372,7 @@ kubectl get helmrelease --all-namespaces \
         --argjson grp "$grp" '
         def pick($o; ks): reduce ks[] as $k ({}; if ($o | has($k)) then . + {($k): $o[$k]} else . end);
         ({cluster: $cluster}
-         + pick($grp; ["minReplicas","maxReplicas","instanceType","diskSize","roles","resources","gpus","kubelet"])
+         + pick($grp; ["minReplicas","maxReplicas","instanceType","diskSize","roles","resources","gpus","kubelet","logSerialConsole"])
          # storageClass: per-group value if set and non-empty, else cluster-level
          # (mirrors the parent `group.storageClass | default .Values.storageClass`).
          + (if (($grp | has("storageClass")) and ($grp.storageClass != "")) then {storageClass: $grp.storageClass}
