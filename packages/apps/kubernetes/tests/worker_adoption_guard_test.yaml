@@ -1,0 +1,30 @@
+suite: Phase 2 worker-pool adoption guard
+
+# The guard in templates/cluster.yaml refuses to render the control-plane-only
+# chart when a live, un-adopted worker MachineDeployment for this cluster still
+# exists (the adoption migration did not run), so Helm cannot silently prune it
+# and delete the tenant's worker VMs. It keys on a live `lookup`, which returns
+# nil under helm-unittest / `helm template` / any client-side render — so it MUST
+# be a no-op there, even on an upgrade render. This suite pins that inertness:
+# were the guard to fail closed on the empty offline lookup, the whole chart
+# would stop rendering here and every parent-chart unit test would break.
+release:
+  name: kubernetes-test
+  namespace: tenant-test
+  upgrade: true
+
+values:
+  - values/common.yaml
+
+templates:
+  - templates/cluster.yaml
+
+tests:
+  - it: is inert on a client-side upgrade render (empty lookup) and still renders the control plane
+    asserts:
+      # Render succeeded (the guard did not `fail`) and produced the control plane.
+      - isKind:
+          of: KamajiControlPlane
+        documentSelector:
+          path: kind
+          value: KamajiControlPlane

@@ -77,6 +77,38 @@ data:
     to reconcile - this HelmRelease will pick up the DataStore on its next
     5m reconcile loop and provision the cluster.
 {{- else }}
+{{- /* Phase 2 worker-pool adoption guard. Worker pools now live in per-pool
+       kubernetes-nodes releases; the platform migration adopts each pre-split
+       pool's live objects onto its child release (re-annotating
+       meta.helm.sh/release-name, pinning helm.sh/resource-policy=keep) as a
+       pre-upgrade hook, BEFORE this control-plane-only chart reconciles. If
+       that migration did not run (its version slot was already stamped, or it
+       was renumbered out on a merge/backport), a live worker MachineDeployment
+       is still annotated to THIS parent release, and Helm's control-plane-only
+       re-render would prune it and cascade-delete the tenant's worker VMs.
+       Refuse to render instead: the upgrade blocks with a legible reason and
+       the workers keep running on the prior release until the migration runs.
+
+       Fail-closed like system/seaweedfs naming-guard: the release Namespace is
+       a canary that always exists for a live install/upgrade, so an empty
+       canary means a client-side render (helm template / unittest / CI lint,
+       where lookup returns nil) that never prunes live objects — skip there.
+       Discriminate on the adoption annotation, never on mere existence: the
+       MachineDeployment always exists at render time, so an existence-only
+       guard would deadlock the routine upgrade (see helmreleases/ouroboros.yaml). */}}
+{{- if .Release.IsUpgrade }}
+{{-   if lookup "v1" "Namespace" "" .Release.Namespace }}
+{{-     $unadopted := list }}
+{{-     range $md := (lookup "cluster.x-k8s.io/v1beta1" "MachineDeployment" $.Release.Namespace "").items }}
+{{-       if and (eq (dig "spec" "clusterName" "" $md) $.Release.Name) (eq (dig "metadata" "annotations" "meta.helm.sh/release-name" "" $md) $.Release.Name) }}
+{{-         $unadopted = append $unadopted (dig "metadata" "name" "" $md) }}
+{{-       end }}
+{{-     end }}
+{{-     if $unadopted }}
+{{-       fail (printf "kubernetes: refusing to render cluster %q control-plane-only — worker MachineDeployment(s) %v are still owned by this release, so the Phase 2 worker-pool adoption migration has not run. Rendering now would let Helm prune them and delete the tenant's worker VMs. Run the platform migration that adopts worker pools into KubernetesNodes (its slot must be stamped in the cozystack-version ConfigMap) before upgrading this cluster." $.Release.Name $unadopted) }}
+{{-     end }}
+{{-   end }}
+{{- end }}
 {{- /* Validate user-supplied apiServer.extraVolumes / extraVolumeMounts before
        they are wired into the control-plane Deployment and apiserver container.
 
