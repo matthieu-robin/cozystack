@@ -1,13 +1,23 @@
 suite: Phase 2 worker-pool adoption guard
 
 # The guard in templates/cluster.yaml refuses to render the control-plane-only
-# chart when a live, un-adopted worker MachineDeployment for this cluster still
-# exists (the adoption migration did not run), so Helm cannot silently prune it
-# and delete the tenant's worker VMs. It keys on a live `lookup`, which returns
-# nil under helm-unittest / `helm template` / any client-side render — so it MUST
-# be a no-op there, even on an upgrade render. This suite pins that inertness:
-# were the guard to fail closed on the empty offline lookup, the whole chart
-# would stop rendering here and every parent-chart unit test would break.
+# chart when a live worker MachineDeployment for this cluster is still owned by
+# THIS parent release AND is not pinned with helm.sh/resource-policy=keep (the
+# adoption migration never processed it), so Helm cannot silently prune it and
+# delete the tenant's worker VMs.
+#
+# The guard keys on a live `lookup`. Under `helm template` / CI lint the lookup
+# returns nil, so the guard MUST be a no-op there even on an upgrade render;
+# the first test pins that inertness. The remaining tests seed a live lookup
+# through `kubernetesProvider` (the same technique as
+# kubernetes-nodes/tests/parent_version_skew_test.yaml) and pin the real
+# contract: an owned+unpinned MD fails the render, an owned+pinned MD renders
+# (a pool the migration deliberately left pinned-but-unadopted is prune-proof
+# and must not deadlock the upgrade), and a MD adopted onto its child release
+# renders. cluster.yaml only ever looks up v1/Namespace (the canary) and
+# cluster.x-k8s.io/v1beta1/MachineDeployment, so the scheme registers exactly
+# those two kinds; the release Namespace object is planted so the canary
+# resolves and the guard body runs.
 release:
   name: kubernetes-test
   namespace: tenant-test
@@ -23,6 +33,105 @@ tests:
   - it: is inert on a client-side upgrade render (empty lookup) and still renders the control plane
     asserts:
       # Render succeeded (the guard did not `fail`) and produced the control plane.
+      - isKind:
+          of: KamajiControlPlane
+        documentSelector:
+          path: kind
+          value: KamajiControlPlane
+
+  - it: refuses to render when an owned, unpinned worker MachineDeployment is still live
+    kubernetesProvider:
+      scheme: &scheme
+        "v1/Namespace":
+          gvr:
+            group: ""
+            version: "v1"
+            resource: "namespaces"
+          namespaced: false
+        "cluster.x-k8s.io/v1beta1/MachineDeployment":
+          gvr:
+            group: "cluster.x-k8s.io"
+            version: "v1beta1"
+            resource: "machinedeployments"
+          namespaced: true
+      objects:
+        - &nsObject
+          kind: Namespace
+          apiVersion: v1
+          metadata:
+            name: tenant-test
+        - kind: MachineDeployment
+          apiVersion: cluster.x-k8s.io/v1beta1
+          metadata:
+            name: kubernetes-test-md0
+            namespace: tenant-test
+            annotations:
+              meta.helm.sh/release-name: kubernetes-test
+          spec:
+            clusterName: kubernetes-test
+    asserts:
+      - failedTemplate:
+          errorPattern: "refusing to render cluster"
+
+  - it: renders when the owned worker MachineDeployment is pinned with resource-policy=keep
+    kubernetesProvider:
+      scheme: *scheme
+      objects:
+        - *nsObject
+        - kind: MachineDeployment
+          apiVersion: cluster.x-k8s.io/v1beta1
+          metadata:
+            name: kubernetes-test-md0
+            namespace: tenant-test
+            annotations:
+              meta.helm.sh/release-name: kubernetes-test
+              helm.sh/resource-policy: keep
+          spec:
+            clusterName: kubernetes-test
+    asserts:
+      - isKind:
+          of: KamajiControlPlane
+        documentSelector:
+          path: kind
+          value: KamajiControlPlane
+
+  - it: renders when the worker MachineDeployment is adopted onto its child release
+    kubernetesProvider:
+      scheme: *scheme
+      objects:
+        - *nsObject
+        - kind: MachineDeployment
+          apiVersion: cluster.x-k8s.io/v1beta1
+          metadata:
+            name: kubernetes-test-md0
+            namespace: tenant-test
+            annotations:
+              meta.helm.sh/release-name: kubernetes-nodes-test-md0
+              helm.sh/resource-policy: keep
+          spec:
+            clusterName: kubernetes-test
+    asserts:
+      - isKind:
+          of: KamajiControlPlane
+        documentSelector:
+          path: kind
+          value: KamajiControlPlane
+
+  - it: renders when a live MachineDeployment belongs to a different cluster
+    kubernetesProvider:
+      scheme: *scheme
+      objects:
+        - *nsObject
+        - kind: MachineDeployment
+          apiVersion: cluster.x-k8s.io/v1beta1
+          metadata:
+            name: other-cluster-md0
+            namespace: tenant-test
+            annotations:
+              meta.helm.sh/release-name: other-cluster
+          spec:
+            clusterName: other-cluster
+    asserts:
       - isKind:
           of: KamajiControlPlane
         documentSelector:
