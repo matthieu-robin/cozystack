@@ -103,6 +103,22 @@ it reconciles.
 {{- if and $owner (ne $owner .Release.Name) -}}
 {{- fail (printf "kubernetes-nodes: MachineDeployment %q in namespace %q is already managed by release %q, not this pool release %q — the pool name collides with a nodeGroup still managed by the parent kubernetes chart. Rename the pool or remove it from the parent Kubernetes CR's nodeGroups first." $mdName .Release.Namespace $owner .Release.Name) -}}
 {{- end -}}
+{{- /* clusterName-drift guard. The release name kubernetes-nodes-<cluster>-<pool>
+       does not encode where <cluster> ends and <pool> begins: for one release
+       name several (.Values.cluster, pool) splits reconstruct the SAME object
+       name kubernetes-<cluster>-<pool>, so an operator who edits spec.cluster to
+       another such value (its immutability is enforced only by the dashboard,
+       not the aggregated apiserver, see docs/storage-immutability.md) does not
+       prune or delete a single worker VM, but silently flips spec.clusterName
+       and the pool WorkloadMonitor selector. CAPI rejects the immutable
+       MachineDeployment.spec.clusterName Update loudly; the WorkloadMonitor
+       drift is the silent half. Refuse the render when our reconstructed
+       clusterName disagrees with the live object's, and name the value to
+       restore. Inert offline (lookup nil). */}}
+{{- $liveCluster := dig "spec" "clusterName" "" $existing -}}
+{{- if and $liveCluster (ne $liveCluster $clusterName) -}}
+{{- fail (printf "kubernetes-nodes: MachineDeployment %q in namespace %q has spec.clusterName %q but this pool release renders clusterName %q: .Values.cluster was changed after the pool was created, and it is immutable. Object names still collide so no worker VM is pruned, but the pool's WorkloadMonitor selector would silently drift off its machines. Restore spec.cluster to %q on this pool's HelmRelease." $mdName .Release.Namespace $liveCluster $clusterName (trimPrefix "kubernetes-" $liveCluster)) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 
