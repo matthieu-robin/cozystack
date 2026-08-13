@@ -11,11 +11,10 @@ image: image-vm-adoption-controller
 
 image-vm-adoption-controller:
 	docker buildx build -f images/controller/Dockerfile images/controller \
-		--tag $(REGISTRY)/vm-adoption-controller:$(call settag,$(TAG)) \
-		--cache-from type=registry,ref=$(REGISTRY)/vm-adoption-controller:latest \
-		--cache-to type=inline \
+		$(call image-tags,vm-adoption-controller,v$(COZYSTACK_VERSION)) \
+		$(call cache-args,vm-adoption-controller) \
 		--metadata-file images/controller.json \
 		$(BUILDX_ARGS)
-	IMAGE="$(REGISTRY)/vm-adoption-controller:$(call settag,$(TAG))@$$(yq e '."containerimage.digest"' images/controller.json -o json -r)" \
+	IMAGE="$(REGISTRY)/vm-adoption-controller:$(IMAGE_TAG)@$$(yq e '."containerimage.digest"' images/controller.json -o json -r)" \
 		yq -i '.image = strenv(IMAGE)' values.yaml
 	rm -f images/controller.json
