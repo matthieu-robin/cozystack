@@ -380,3 +380,25 @@ JSON
   ! grep -q 'APPLY-HR' "$FAKE_CMDLOG"
   rm -rf "$WORK"
 }
+
+@test "a non-scalar scalar-field on a nodeGroup is pinned and skipped, not applied to a child that cannot validate" {
+  prep
+  # kubectl edit on the parent HR bypasses the aggregated API schema, so a field
+  # the child HR expects to be scalar (here storageClass) can be stored as an
+  # object. Copied verbatim into the child values it fails the KubernetesNodes
+  # schema on install, leaving the child release stuck Failed. The scalar-type
+  # guard must warn, pin the pool's (absent here) objects, skip adoption, and
+  # let the run complete and stamp instead of fabricating an unvalidatable child.
+  cat > "$FAKE_HR_LIST" <<'JSON'
+{"items":[{"metadata":{"namespace":"tenant-test","name":"kubernetes-test3"},"spec":{"values":{"nodeGroups":{"md0":{"minReplicas":1,"storageClass":{"nested":"oops"}}}}}}]}
+JSON
+  rc=0
+  bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
+  cat "$WORK/out"
+  [ "$rc" -eq 0 ]
+  grep -qiE 'non-scalar value' "$WORK/out"
+  grep -q 'storageClass' "$WORK/out"
+  # The pool is pinned+skipped, never applied as a child release.
+  ! grep -q 'APPLY-HR' "$FAKE_CMDLOG"
+  rm -rf "$WORK"
+}
