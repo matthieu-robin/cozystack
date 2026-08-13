@@ -28,10 +28,13 @@ rules:
   resources: ["datavolumes/source"]
   verbs: ["create"]
 
-# Read source PVCs to size the cross-namespace clone
+# Read source PVCs to size the cross-namespace clone, and detach the imported
+# PVCs from the Forklift VM before it is deleted (Forklift owns them by that VM
+# with blockOwnerDeletion, so without this the migrated data is garbage-collected
+# along with the VM the adoption replaces)
 - apiGroups: [""]
   resources: ["persistentvolumeclaims"]
-  verbs: ["get", "list"]
+  verbs: ["get", "list", "update", "patch"]
 
 # Emit Events on imported VMs so adoption outcomes are visible via
 # `kubectl describe` / the dashboard, not only in the controller log

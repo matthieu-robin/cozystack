@@ -22,6 +22,9 @@ var (
 	migrationsGVR  = schema.GroupVersionResource{Group: "forklift.konveyor.io", Version: "v1beta1", Resource: "migrations"}
 	vmsGVR         = schema.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "virtualmachines"}
 	vmInstancesGVR = schema.GroupVersionResource{Group: vmInstanceGroup, Version: vmInstanceVersion, Resource: "vminstances"}
+	vmDisksGVR     = schema.GroupVersionResource{Group: vmDiskGroup, Version: vmDiskVersion, Resource: "vmdisks"}
+	dataVolumesGVR = schema.GroupVersionResource{Group: "cdi.kubevirt.io", Version: "v1beta1", Resource: "datavolumes"}
+	pvcsGVR        = schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumeclaims"}
 )
 
 func newForkliftObj(kind, namespace, name, uid string, ann map[string]string) *unstructured.Unstructured {
@@ -59,9 +62,35 @@ func fakeClient(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 			migrationsGVR:  "MigrationList",
 			vmsGVR:         "VirtualMachineList",
 			vmInstancesGVR: "VMInstanceList",
+			vmDisksGVR:     "VMDiskList",
+			dataVolumesGVR: "DataVolumeList",
+			pvcsGVR:        "PersistentVolumeClaimList",
 		},
 		objs...,
 	)
+}
+
+// newPVC builds an imported disk the way Forklift leaves it: a bare PVC owned by
+// the VirtualMachine Forklift created, with blockOwnerDeletion set.
+func newPVC(namespace, name, ownerVM string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{Object: map[string]interface{}{}}
+	u.SetAPIVersion("v1")
+	u.SetKind("PersistentVolumeClaim")
+	u.SetNamespace(namespace)
+	u.SetName(name)
+	if ownerVM != "" {
+		block := true
+		u.SetOwnerReferences([]metav1.OwnerReference{{
+			APIVersion:         "kubevirt.io/v1",
+			Kind:               "VirtualMachine",
+			Name:               ownerVM,
+			UID:                types.UID("vm-uid"),
+			BlockOwnerDeletion: &block,
+		}})
+	}
+	_ = unstructured.SetNestedField(u.Object, "16Gi", "spec", "resources", "requests", "storage")
+	_ = unstructured.SetNestedField(u.Object, "replicated", "spec", "storageClassName")
+	return u
 }
 
 func newVM(namespace, name string, labels map[string]string) *unstructured.Unstructured {
@@ -307,5 +336,128 @@ func TestIsAdoptionEnabled(t *testing.T) {
 				t.Errorf("isAdoptionEnabled = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// On the raw-copy path Forklift already wrote the disk into the target
+// namespace. Cloning it into a VMDisk there would copy the whole disk a second
+// time and leave two full copies behind for good, so the adoption must keep
+// referencing the imported PVC instead.
+func TestWrapDisksKeepsImportedPVCWhenAdoptingInPlace(t *testing.T) {
+	client := fakeClient(newPVC("tenant-a", "web-disk-0", "web"))
+	c := &AdoptionController{dynamicClient: client, recorder: record.NewFakeRecorder(10)}
+
+	disks := []interface{}{map[string]interface{}{"name": "imported-0", "dvName": "web-disk-0"}}
+	if err := c.wrapDisksAsVMDisks(context.Background(), "tenant-a", "tenant-a", "web", disks); err != nil {
+		t.Fatalf("wrapDisksAsVMDisks: %v", err)
+	}
+
+	if got := disks[0].(map[string]interface{})["dvName"]; got != "web-disk-0" {
+		t.Errorf("dvName = %v, want the imported PVC web-disk-0 (a clone was substituted)", got)
+	}
+	list, err := client.Resource(vmDisksGVR).Namespace("tenant-a").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("listing VMDisks: %v", err)
+	}
+	if len(list.Items) != 0 {
+		t.Errorf("created %d VMDisk(s) for an in-place adoption, want none", len(list.Items))
+	}
+}
+
+// The virt-v2v path still has to move the disk: conversion runs in a privileged
+// namespace the tenant cannot read from, so there the clone is the point.
+func TestWrapDisksClonesWhenCrossingNamespaces(t *testing.T) {
+	client := fakeClient(newPVC("cozy-forklift", "web-disk-0", "web"))
+	c := &AdoptionController{dynamicClient: client, recorder: record.NewFakeRecorder(10)}
+
+	disks := []interface{}{map[string]interface{}{"name": "imported-0", "dvName": "web-disk-0"}}
+	if err := c.wrapDisksAsVMDisks(context.Background(), "cozy-forklift", "tenant-a", "web", disks); err != nil {
+		t.Fatalf("wrapDisksAsVMDisks: %v", err)
+	}
+
+	if got := disks[0].(map[string]interface{})["dvName"]; got != "vm-disk-web-imported-0" {
+		t.Errorf("dvName = %v, want the VMDisk DataVolume vm-disk-web-imported-0", got)
+	}
+	if _, err := client.Resource(vmDisksGVR).Namespace("tenant-a").Get(context.Background(), "web-imported-0", metav1.GetOptions{}); err != nil {
+		t.Errorf("VMDisk was not created for the cross-namespace adoption: %v", err)
+	}
+}
+
+// The imported PVC must be detached from the Forklift VM BEFORE that VM is
+// deleted. Forklift owns the PVC by the VM with blockOwnerDeletion precisely so
+// the two are collected together, so if the order slips the garbage collector
+// destroys a finished transfer -- the observed failure was a completed 16 GiB
+// disk removed 357ms into adoption. The fake client runs no garbage collector,
+// so the ordering itself is what this asserts.
+func TestReleaseSourceVMDetachesImportedPVCBeforeDeletingVM(t *testing.T) {
+	client := fakeClient(
+		newVM("tenant-a", "web", map[string]string{"plan": "uid-1"}),
+		newPVC("tenant-a", "web-disk-0", "web"),
+	)
+
+	c := &AdoptionController{dynamicClient: client, recorder: record.NewFakeRecorder(10)}
+	vm := kubevirtv1.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-a", Name: "web"}}
+	disks := []interface{}{map[string]interface{}{"name": "imported-0", "dvName": "web-disk-0"}}
+
+	if err := c.releaseSourceVM(context.Background(), vm, "tenant-a", "web", disks); err != nil {
+		t.Fatalf("releaseSourceVM: %v", err)
+	}
+
+	detachedAt, deletedAt := -1, -1
+	for i, a := range client.Actions() {
+		if a.Matches("update", "persistentvolumeclaims") && detachedAt < 0 {
+			detachedAt = i
+		}
+		if a.Matches("delete", "virtualmachines") && deletedAt < 0 {
+			deletedAt = i
+		}
+	}
+	if detachedAt < 0 {
+		t.Fatal("imported PVC was never detached from the source VM")
+	}
+	if deletedAt < 0 {
+		t.Fatal("source VM was never deleted")
+	}
+	if detachedAt > deletedAt {
+		t.Errorf("PVC detached at action %d but VM deleted at %d: the garbage collector would take the migrated disk with the VM", detachedAt, deletedAt)
+	}
+
+	cur, err := client.Resource(pvcsGVR).Namespace("tenant-a").Get(context.Background(), "web-disk-0", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("imported PVC did not survive adoption: %v", err)
+	}
+	for _, ref := range cur.GetOwnerReferences() {
+		if ref.Kind == "VirtualMachine" {
+			t.Errorf("imported PVC still owned by VirtualMachine %s after adoption", ref.Name)
+		}
+	}
+}
+
+// Detaching is narrow on purpose: only ownerReferences pointing at the VM being
+// released are dropped, so any other owner keeps its claim on the volume.
+func TestReleaseImportedVolumesLeavesForeignOwnersAlone(t *testing.T) {
+	pvc := newPVC("tenant-a", "web-disk-0", "web")
+	pvc.SetOwnerReferences(append(pvc.GetOwnerReferences(), metav1.OwnerReference{
+		APIVersion: "cdi.kubevirt.io/v1beta1",
+		Kind:       "DataVolume",
+		Name:       "someone-else",
+		UID:        types.UID("dv-uid"),
+	}))
+	client := fakeClient(pvc)
+	c := &AdoptionController{dynamicClient: client, recorder: record.NewFakeRecorder(10)}
+
+	vm := kubevirtv1.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-a", Name: "web"}}
+	disks := []interface{}{map[string]interface{}{"name": "imported-0", "dvName": "web-disk-0"}}
+	if err := c.releaseImportedVolumes(context.Background(), vm, disks); err != nil {
+		t.Fatalf("releaseImportedVolumes: %v", err)
+	}
+
+	cur, err := client.Resource(pvcsGVR).Namespace("tenant-a").Get(context.Background(), "web-disk-0", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("reading PVC: %v", err)
+	}
+	refs := cur.GetOwnerReferences()
+	if len(refs) != 1 || refs[0].Kind != "DataVolume" {
+		t.Errorf("ownerReferences = %+v, want only the unrelated DataVolume owner", refs)
 	}
 }

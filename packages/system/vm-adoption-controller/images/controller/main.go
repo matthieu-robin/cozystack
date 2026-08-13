@@ -689,7 +689,21 @@ func (c *AdoptionController) ensureVMDisk(ctx context.Context, vmDiskNs, vmDiskN
 // wrapDisksAsVMDisks turns the raw imported PVC reference of each disk into a
 // managed Cozystack VMDisk (clone) in the target namespace, rewriting each
 // disk's dvName to the VMDisk's DataVolume (`vm-disk-<vmInstance>-<disk>`).
+//
+// This is only needed when the disk has to cross a namespace: on the virt-v2v
+// path Forklift converts in a privileged namespace and the data must be copied
+// into the tenant. On the raw-copy path Forklift wrote the disk straight into
+// the target namespace, with the right size, StorageClass and content, so there
+// is nothing to move. Cloning it there would copy the whole disk a second time
+// for no gain and leave two full copies behind permanently -- and, worse, race
+// the clone against releaseSourceVM deleting the VM that owns the source PVC.
+// The disks keep pointing at the imported PVC instead; vm-instance references a
+// bare PersistentVolumeClaim when no DataVolume of that name exists.
 func (c *AdoptionController) wrapDisksAsVMDisks(ctx context.Context, srcNs, targetNs, vmInstanceName string, disks []interface{}) error {
+	if srcNs == targetNs {
+		klog.V(2).Infof("Adoption target %s is the import namespace; referencing the imported PVCs directly instead of cloning", targetNs)
+		return nil
+	}
 	for _, d := range disks {
 		dm, ok := d.(map[string]interface{})
 		if !ok {
@@ -981,7 +995,7 @@ func (c *AdoptionController) adoptVMViaVMDisks(ctx context.Context, vm kubevirtv
 	// earlier pass and only the source VM is left to release.
 	if _, err := c.dynamicClient.Resource(vmInstanceGVR).Namespace(targetNamespace).Get(ctx, vmInstanceName, metav1.GetOptions{}); err == nil {
 		klog.Infof("VMInstance %s/%s already exists, ensuring source VM is handled", targetNamespace, vmInstanceName)
-		return c.releaseSourceVM(ctx, vm, targetNamespace, vmInstanceName)
+		return c.releaseSourceVM(ctx, vm, targetNamespace, vmInstanceName, disks)
 	}
 
 	spec := map[string]interface{}{
@@ -1030,20 +1044,97 @@ func (c *AdoptionController) adoptVMViaVMDisks(ctx context.Context, vm kubevirtv
 	c.recorder.Eventf(vmRef(&vm), corev1.EventTypeNormal, "Adopted",
 		"Imported VM adopted as Cozystack VMInstance %s/%s", targetNamespace, vmInstanceName)
 
-	return c.releaseSourceVM(ctx, vm, targetNamespace, vmInstanceName)
+	return c.releaseSourceVM(ctx, vm, targetNamespace, vmInstanceName, disks)
+}
+
+// releaseImportedVolumes detaches the volumes this adoption consumes from the
+// Forklift-created VirtualMachine, so deleting that VM does not take the
+// migrated data with it.
+//
+// Forklift deliberately owns every migrated PVC by the VM it creates: EnsureVM
+// (pkg/controller/plan/kubevirt.go) patches each PVC with an ownerReference
+// carrying blockOwnerDeletion, described upstream as being there "so that
+// they'll be cleaned up when the VirtualMachine is removed". That is the right
+// default for Forklift and exactly wrong once Cozystack adopts the import: the
+// VMInstance references those PVCs, so a cascading delete destroys a completed
+// transfer.
+//
+// The detach is deliberately narrow -- only the volumes named by this VM's
+// disks, only ownerReferences pointing at this VM. An import that never reaches
+// adoption keeps Forklift's ownership, and with it Forklift's cleanup of
+// abandoned migrations.
+func (c *AdoptionController) releaseImportedVolumes(ctx context.Context, vm kubevirtv1.VirtualMachine, disks []interface{}) error {
+	gvrs := []schema.GroupVersionResource{
+		{Group: "cdi.kubevirt.io", Version: "v1beta1", Resource: "datavolumes"},
+		{Version: "v1", Resource: "persistentvolumeclaims"},
+	}
+	for _, d := range disks {
+		dm, ok := d.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := dm["dvName"].(string)
+		if name == "" {
+			continue
+		}
+		for _, gvr := range gvrs {
+			if err := c.dropVMOwnerReference(ctx, gvr, vm, name); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// dropVMOwnerReference removes the ownerReferences pointing at vm from a single
+// object, leaving any other owner intact. A missing object is not an error:
+// Forklift deletes the DataVolume once the transfer completes, so on a finished
+// import only the PVC is normally still there.
+func (c *AdoptionController) dropVMOwnerReference(ctx context.Context, gvr schema.GroupVersionResource,
+	vm kubevirtv1.VirtualMachine, name string) error {
+
+	obj, err := c.dynamicClient.Resource(gvr).Namespace(vm.Namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read %s %s/%s: %w", gvr.Resource, vm.Namespace, name, err)
+	}
+
+	refs := obj.GetOwnerReferences()
+	kept := make([]metav1.OwnerReference, 0, len(refs))
+	for _, ref := range refs {
+		// Same namespace and same name make this the VM being released; the
+		// typed VM carries no UID here, so kind+name is the available identity.
+		if ref.Kind == "VirtualMachine" && ref.Name == vm.Name {
+			continue
+		}
+		kept = append(kept, ref)
+	}
+	if len(kept) == len(refs) {
+		return nil
+	}
+
+	obj.SetOwnerReferences(kept)
+	if _, err := c.dynamicClient.Resource(gvr).Namespace(vm.Namespace).Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("failed to detach %s %s/%s from VM %s: %w", gvr.Resource, vm.Namespace, name, vm.Name, err)
+	}
+	klog.Infof("Detached %s %s/%s from Forklift VM %s/%s so it survives adoption", gvr.Resource, vm.Namespace, name, vm.Namespace, vm.Name)
+	return nil
 }
 
 // releaseSourceVM hands the Forklift-created VM over to the managed VMInstance,
 // once that VMInstance exists. In the same namespace the VMInstance renders a
 // VirtualMachine under the same name, so the Forklift VM has to go; the imported
-// PVC stays behind as the VMDisk clone source, since KubeVirt does not delete
-// PVCs with a VM. In a different namespace nothing collides, so the VM is only
-// labeled adopted to keep it out of the next reconcile.
+// PVCs it referenced are detached from it first (see releaseImportedVolumes) so
+// they survive the delete and back the adopted VMInstance. In a different
+// namespace nothing collides, so the VM is only labeled adopted to keep it out
+// of the next reconcile.
 //
 // Failing here is retryable: the VMInstance is already created, so the next loop
 // takes the idempotency path and calls this again.
 func (c *AdoptionController) releaseSourceVM(ctx context.Context, vm kubevirtv1.VirtualMachine,
-	targetNamespace, vmInstanceName string) error {
+	targetNamespace, vmInstanceName string, disks []interface{}) error {
 
 	helmReleaseName := "vm-instance-" + vmInstanceName
 	if targetNamespace != vm.Namespace {
@@ -1051,6 +1142,13 @@ func (c *AdoptionController) releaseSourceVM(ctx context.Context, vm kubevirtv1.
 			return fmt.Errorf("failed to label source VM %s/%s as adopted: %w", vm.Namespace, vm.Name, err)
 		}
 		return nil
+	}
+
+	// Must happen before the delete, not after: the garbage collector acts on
+	// the ownerReference as soon as the VM goes, and a PVC it has already
+	// removed cannot be recovered.
+	if err := c.releaseImportedVolumes(ctx, vm, disks); err != nil {
+		return fmt.Errorf("failed to detach imported volumes from source VM %s/%s: %w", vm.Namespace, vm.Name, err)
 	}
 
 	vmGVR := schema.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "virtualmachines"}
