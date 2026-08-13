@@ -102,3 +102,9 @@ ingress-nginx:
         cpu: 10m
         memory: 20Mi
 
+# Deny pod-to-webhook traffic on the admission port, leaving it reachable only
+# by the API server (directly on a management cluster, or through the
+# konnectivity agent on a Kamaji-hosted tenant cluster). Requires Cilium.
+admissionWebhookPolicy:
+  enabled: true
+

@@ -16,3 +16,9 @@ update:
 	patch --no-backup-if-mismatch -p4 < patches/disable-ca-key-rotation.patch
 	rm -f charts/ingress-nginx/templates/controller-deployment.yaml.orig
 	rm -rf charts/ingress-nginx/changelog/
+
+# --with-subchart=false: the vendored chart carries upstream's own suites, which
+# assert against upstream default values and fail under the overrides in our
+# values.yaml. They are upstream's contract, not ours; run only our own.
+test:
+	helm unittest --with-subchart=false .

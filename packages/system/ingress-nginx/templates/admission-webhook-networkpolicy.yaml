@@ -1,0 +1,69 @@
+{{- if .Values.admissionWebhookPolicy.enabled }}
+{{- $inc := index .Values "ingress-nginx" | default dict }}
+{{- $webhookPort := dig "controller" "admissionWebhooks" "port" 8443 $inc }}
+---
+# The ingress-nginx admission webhook only ever needs to be reachable by the
+# API server. Leaving it reachable from every pod in the cluster is avoidable
+# attack surface: any flaw in the webhook then becomes exploitable by any
+# workload in any namespace, which is precisely what made CVE-2025-1974
+# (IngressNightmare) critical rather than merely serious.
+#
+# This policy is deny-only and explicitly disables default-deny. A Cilium rule
+# that carries an ingress section normally puts the selected endpoints behind a
+# default-deny, which here would mean enumerating every port the controller
+# serves (80, 443, metrics, the protobuf exporter, any tcp/udp services) and
+# silently breaking traffic on the first one forgotten. With
+# enableDefaultDeny.ingress=false the rule only subtracts access to the webhook
+# port and leaves everything else exactly as it was.
+#
+# Two legitimate callers are carved out of the deny:
+#
+#   * host-network sources, which are not Cilium endpoints and so are never
+#     matched by fromEndpoints. This covers a management cluster, where the
+#     kube-apiserver runs on the host network.
+#
+#   * the konnectivity agent. For a Kamaji-hosted tenant cluster the API server
+#     lives outside the cluster and reaches in-cluster webhooks through the
+#     konnectivity tunnel: Kamaji defines only the "cluster" egress selection
+#     (internal/resources/konnectivity/egress_selector_configuration_resource.go),
+#     and webhook calls fall under it. The connection therefore leaves the
+#     tunnel from the agent pod in kube-system, not from the API server address,
+#     so a fromEntities[kube-apiserver] allow would not match it and every
+#     Ingress create/update in the tenant cluster would start failing.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ingress-nginx-admission-webhook
+  namespace: {{ .Release.Namespace }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: ingress-nginx
+      app.kubernetes.io/component: controller
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingressDeny:
+  # Every pod in the cluster except the konnectivity agent. The namespace key
+  # is matched with Exists so the rule spans all namespaces: a plain
+  # fromEndpoints in a namespaced CiliumNetworkPolicy would only ever select
+  # pods sharing this policy's namespace.
+  - fromEndpoints:
+    - matchExpressions:
+      - key: k8s:io.kubernetes.pod.namespace
+        operator: Exists
+      - key: k8s-app
+        operator: NotIn
+        values:
+        - konnectivity-agent
+    toPorts:
+    - ports:
+      - port: {{ $webhookPort | quote }}
+        protocol: TCP
+  - fromEntities:
+    - world
+    toPorts:
+    - ports:
+      - port: {{ $webhookPort | quote }}
+        protocol: TCP
+{{- end }}
