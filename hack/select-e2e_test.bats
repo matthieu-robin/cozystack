@@ -393,6 +393,78 @@ assert_full_suite() {
     rm -rf "$tmp"
 }
 
+@test "a per-app e2e bats file selects that app's suite" {
+    # hack/e2e-apps/<name>.bats is the pre-Chainsaw per-app BATS suite, named
+    # after the app exactly as a Chainsaw suite directory is. Those paths matched
+    # no rule at all and escalated as unclassified -- 5 of the last 150 merged
+    # pull requests, all of them the migration deleting one of these files.
+    #
+    # Mapped rather than marked inert: what is left here is wired to nothing
+    # today, and inert would bake that in and go quietly wrong the day a lane
+    # runs them again. This asserts the mapping on a name that IS a suite, so it
+    # measures the rule rather than the orphan status of the files that happen to
+    # remain.
+    tmp=$(mktemp -d)
+    cp -r packages/core/platform/sources "$tmp/sources"
+    echo "hack/e2e-apps/postgres.bats" > "$tmp/diff"
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources")
+    [ "$output" = "postgres" ]
+    # Alongside a real app path it must union, not replace -- the cheap way to
+    # pass the line above is a rule that returns early.
+    printf '%s\n' hack/e2e-apps/postgres.bats packages/apps/redis/values.yaml > "$tmp/diff"
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources")
+    [ "$output" = "postgres redis" ]
+    rm -rf "$tmp"
+}
+
+@test "a per-app e2e bats file naming no suite still escalates, and says so" {
+    # The other half of the mapping: the basename is fed to the same intersection
+    # every other selection goes through, so a name no suite carries selects
+    # nothing and the backstop escalates. Same outcome these paths had as
+    # unclassified, which is why mapping optimistically loses nothing -- and the
+    # reason line is what keeps it debuggable.
+    tmp=$(mktemp -d)
+    cp -r packages/core/platform/sources "$tmp/sources"
+    echo "hack/e2e-apps/no-such-app.bats" > "$tmp/diff"
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources" 2>"$tmp/err")
+    assert_full_suite "$output"
+    if ! grep -q "select-e2e:.*no runnable suite is named by.*no-such-app" "$tmp/err"; then
+        echo "an unmatched e2e-apps basename must name itself; stderr was:" >&2
+        cat "$tmp/err" >&2
+        exit 1
+    fi
+    rm -rf "$tmp"
+}
+
+@test "helm-unittest fixtures and gitattributes select nothing" {
+    # packages/tests/ is a helm-unittest fixture chart: changing a test OF
+    # cozy-lib does not change cozy-lib, no PackageSource lists these paths as a
+    # component, and nothing installs them. Every .gitattributes in the tree
+    # marks generated files linguist-generated, which reaches no build, chart or
+    # test. Both classes fell through as unclassified and bought a full run --
+    # 6 of the last 150 merged pull requests between them.
+    tmp=$(mktemp -d)
+    cp -r packages/core/platform/sources "$tmp/sources"
+    printf '%s\n' packages/tests/cozy-lib-tests/tests/quota_test.yaml \
+        packages/tests/cozy-lib-tests/templates/tests/quota.yaml \
+        packages/system/.gitattributes \
+        .gitattributes > "$tmp/diff"
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources")
+    [ -z "$output" ]
+    # The library itself is a different question and must still escalate: these
+    # fixtures test cozy-lib, so an inert rule reaching the library would be the
+    # dangerous over-reach here.
+    echo "packages/library/cozy-lib/templates/_quota.tpl" > "$tmp/diff"
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources" 2>/dev/null)
+    assert_full_suite "$output"
+    # And an inert fixture beside a real app path must not mask the selection.
+    printf '%s\n' packages/tests/cozy-lib-tests/tests/quota_test.yaml \
+        packages/apps/postgres/values.yaml > "$tmp/diff"
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources")
+    [ "$output" = "postgres" ]
+    rm -rf "$tmp"
+}
+
 @test "a broken yq is named rather than passed off as an empty graph" {
     # Both indexes are one yq each, read as `$(build_owners_index | sort -u)`,
     # so the pipeline reports sort's status and set -e never sees yq's. A

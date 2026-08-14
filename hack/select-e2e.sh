@@ -109,9 +109,22 @@ full_suite_pattern='^(packages/library/|packages/core/|api/|cmd/|internal/|pkg/|
 #   - .claude/ .gemini/  agent config, never shipped
 #   - img/            README assets
 #   - hack/testdata/  fixtures for the bats unit tests, not for e2e
+#   - packages/tests/ helm-unittest fixture charts. cozy-lib-tests exercises
+#                     library/cozy-lib from the outside; changing a test OF
+#                     cozy-lib does not change cozy-lib, no PackageSource lists
+#                     these paths as a component, and nothing installs them. A
+#                     change to the library itself still escalates through
+#                     packages/library/ in full_suite_pattern
 #   - boilerplate.go.txt / dcgm-default-counters.csv  codegen header; a CSV read
 #                     only by check-gpu-recording-rules.bats
-inert_config_pattern='^(examples/|\.github/|\.claude/|\.gemini/|img/|hack/testdata/|hack/boilerplate\.go\.txt$|hack/dcgm-default-counters\.csv$|LICENSE$|\.gitignore$|\.pre-commit-config\.yaml$|\.coderabbit\.yaml$)'
+#   - *.gitattributes Every one in this tree marks generated files
+#                     `linguist-generated`, which is GitHub's language-stats and
+#                     diff-collapsing hint and reaches no build, chart or test.
+#                     Matched by name wherever it lives, so the next one added
+#                     beside a package does not read as an oversight; one under a
+#                     tree full_suite_pattern already covers (api/, internal/)
+#                     still escalates, since that pattern is checked first
+inert_config_pattern='^(examples/|\.github/|\.claude/|\.gemini/|img/|hack/testdata/|packages/tests/|hack/boilerplate\.go\.txt$|hack/dcgm-default-counters\.csv$|LICENSE$|\.gitignore$|\.pre-commit-config\.yaml$|\.coderabbit\.yaml$)|(^|/)\.gitattributes$'
 
 # All known Chainsaw suites: every dir under hack/e2e-chainsaw/ holding a
 # chainsaw-test.yaml (this excludes _lib/ and the top-level config files).
@@ -277,6 +290,26 @@ while IFS= read -r file || [ -n "$file" ]; do
       continue ;;
     hack/e2e-chainsaw/*/*)
       app=$(echo "$file" | sed -nE 's,^hack/e2e-chainsaw/([^/]+)/.*,\1,p')
+      selected_apps="$selected_apps $app"
+      trigger_any=1
+      continue ;;
+    hack/e2e-apps/*.bats)
+      # The pre-Chainsaw per-app BATS suites. One file per app, named after it,
+      # so the suite name comes off the basename exactly as the rule above takes
+      # it off the directory.
+      #
+      # Deliberately NOT marked inert, even though what remains here is wired to
+      # nothing after the Chainsaw migration: inert would bake that orphan status
+      # into the rule and go quietly wrong the day a lane runs these again. The
+      # mapping is correct either way — a file named after an app selects that
+      # app's suite whether or not anything currently executes it.
+      #
+      # A basename that names no suite (the monitoring-oidc-* pair left here has
+      # no Chainsaw suite of its own) is dropped by intersect_suites downstream,
+      # and if it was the only selection the backstop escalates and says so. That
+      # is the same outcome the unclassified fall-through gave these paths before,
+      # so nothing is lost by mapping optimistically.
+      app=$(echo "$file" | sed -nE 's,^hack/e2e-apps/(.+)\.bats$,\1,p')
       selected_apps="$selected_apps $app"
       trigger_any=1
       continue ;;
