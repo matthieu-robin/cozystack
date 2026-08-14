@@ -45,10 +45,12 @@
 # rather than a courtesy: the answer "run everything" is the same 21 suite names
 # whichever rule produced it, so without a reason line the only way to learn why
 # a pull request ran the whole suite is to re-derive the selection by hand. Four
-# of the seven were silent, full_suite_pattern — the commonest cause by a wide
-# margin — among them, which made the usual answer the one the log never had. A
-# test asserts each line, because a reason that regresses to silence changes no
-# selection and so is invisible to every other test here.
+# of them were silent before this rule, full_suite_pattern — the commonest cause
+# by a wide margin — among them, which made the usual answer the one the log
+# never had. A test asserts each line, because a reason that regresses to silence
+# changes no selection and so is invisible to every other test here. Deliberately
+# stated without a count: the number of escalating branches moves whenever a rule
+# is added, and a comment carrying a stale one reads as authoritative.
 #
 # The lines go to stderr, never stdout. stdout is the suite list and both lanes
 # parse it, so a reason line there would be read as a suite name.
@@ -312,7 +314,7 @@ while IFS= read -r file || [ -n "$file" ]; do
       selected_apps="$selected_apps $app"
       trigger_any=1
       continue ;;
-    hack/e2e-apps/*.bats)
+    hack/e2e-apps/*)
       # The pre-Chainsaw per-app BATS suites. One file per app, named after it,
       # so the suite name comes off the basename exactly as the rule above takes
       # it off the directory.
@@ -323,14 +325,34 @@ while IFS= read -r file || [ -n "$file" ]; do
       # mapping is correct either way — a file named after an app selects that
       # app's suite whether or not anything currently executes it.
       #
-      # A basename that names no suite (the monitoring-oidc-* pair left here has
-      # no Chainsaw suite of its own) is dropped by intersect_suites downstream,
-      # and if it was the only selection the backstop escalates and says so. That
-      # is the same outcome the unclassified fall-through gave these paths before,
-      # so nothing is lost by mapping optimistically.
-      app=$(echo "$file" | sed -nE 's,^hack/e2e-apps/(.+)\.bats$,\1,p')
-      selected_apps="$selected_apps $app"
-      trigger_any=1
+      # The membership test is what makes this per-path, and it is not optional.
+      # Adding an unmatched name to selected_apps and letting the final
+      # intersection drop it leaves the verdict to the REST of the diff: alone it
+      # empties the selection and the backstop escalates, but beside any path that
+      # contributed a suite the escalation vanishes and the run narrows to that
+      # suite with nothing on stderr. That is the merge-before-escalate shape
+      # #3330 removed from the graph walk, and it applies here for the same
+      # reason — coverage is a property of the changed path.
+      #
+      # `[^/]+` rather than `.+`: POSIX case matches `/` with `*`, so this arm
+      # also sees nested paths, and an unanchored capture would turn
+      # hack/e2e-apps/fixtures/postgres.bats into the "suite" fixtures/postgres.
+      # Nothing nested exists here today; whatever appears would be shared
+      # material for these suites the way hack/e2e-chainsaw/_lib/ is for the
+      # Chainsaw ones, so it escalates for the same reason rather than being
+      # guessed at. A non-.bats file directly in the directory lands here too and
+      # is treated the same way.
+      app=$(echo "$file" | sed -nE 's,^hack/e2e-apps/([^/]+)\.bats$,\1,p')
+      if [ -z "$app" ]; then
+        echo "select-e2e: '$file' is not a per-app suite file (hack/e2e-apps/<name>.bats), so it is shared material for all of them — escalating to the full suite" >&2
+        trigger_full=1
+      elif echo "$all_apps" | grep -Fxq "$app"; then
+        selected_apps="$selected_apps $app"
+        trigger_any=1
+      else
+        echo "select-e2e: '$file' names no runnable suite ('$app') — escalating to the full suite" >&2
+        trigger_full=1
+      fi
       continue ;;
     examples/backups/*/*)
       # The etcd, postgres, mariadb and clickhouse backup round-trip tests
@@ -472,12 +494,12 @@ done
 final_apps=$(intersect_suites "$group_suites $selected_apps")
 
 # Backstop. Every graph path above either escalates or contributes a suite that
-# exists, so what still reaches this is a directly-selected name that is not a
-# suite: a per-suite edit naming a directory that holds no chainsaw-test.yaml —
-# shared material beside _lib/, or a suite nested deeper than the depth-2 scan
-# looks — or a hack/e2e-apps/<name>.bats whose <name> no suite carries.
-# Selecting nothing for those would skip E2E outright, so failing towards the
-# full suite is the only safe way to be wrong here.
+# exists, and both rules that select a suite by name — the per-app BATS one and
+# the examples/backups/<app>/ one — membership-test it first, so what still
+# reaches this is a per-suite Chainsaw edit naming a directory that holds no
+# chainsaw-test.yaml: shared material beside _lib/, or a suite nested deeper than
+# the depth-2 scan looks. Selecting nothing for those would skip E2E outright, so
+# failing towards the full suite is the only safe way to be wrong here.
 #
 # group_suites is empty whenever this fires — every group either escalated above
 # or contributed a suite that exists — so the names worth naming are the

@@ -473,22 +473,72 @@ assert_full_suite() {
     rm -rf "$tmp"
 }
 
-@test "a per-app e2e bats file naming no suite still escalates, and says so" {
-    # The other half of the mapping: the basename is fed to the same intersection
-    # every other selection goes through, so a name no suite carries selects
-    # nothing and the backstop escalates. Same outcome these paths had as
-    # unclassified, which is why mapping optimistically loses nothing -- and the
-    # reason line is what keeps it debuggable.
+@test "a per-app e2e bats file naming no suite escalates on its own account" {
+    # The other half of the mapping, and the half that has to be decided HERE
+    # rather than by the final intersection. Deferring it made the verdict depend
+    # on the rest of the diff: alone the selection emptied and the backstop
+    # escalated, but beside any path that contributed a suite the escalation
+    # disappeared and the run narrowed to that suite with nothing on stderr --
+    # the merge-before-escalate shape #3330 removed from the graph walk.
+    #
+    # So both diffs are asserted, and the mixed one is the regression pin: the
+    # isolated case passes with the escalation deferred and cannot see the bug.
     tmp=$(mktemp -d)
     cp -r packages/core/platform/sources "$tmp/sources"
+    # Premise: the name must really be absent from the suite list, or this
+    # measures the matched branch.
+    if full_suite_list | tr ' ' '\n' | grep -Fxq no-such-app; then
+        echo "premise broken: no-such-app is a real suite" >&2
+        exit 1
+    fi
     echo "hack/e2e-apps/no-such-app.bats" > "$tmp/diff"
     output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources" 2>"$tmp/err")
     assert_full_suite "$output"
-    if ! grep -q "select-e2e:.*no runnable suite is named by.*no-such-app" "$tmp/err"; then
+    if ! grep -q "select-e2e:.*no-such-app.*names no runnable suite" "$tmp/err"; then
         echo "an unmatched e2e-apps basename must name itself; stderr was:" >&2
         cat "$tmp/err" >&2
         exit 1
     fi
+    printf '%s\n' hack/e2e-apps/no-such-app.bats packages/apps/redis/values.yaml > "$tmp/diff"
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources" 2>"$tmp/err")
+    assert_selection "an unmatched per-app bats file was swallowed by another path's suite" \
+        "$output" "$(full_suite_list)"
+    if ! grep -q "select-e2e:.*no-such-app.*names no runnable suite" "$tmp/err"; then
+        echo "the escalation must still be named in a mixed diff; stderr was:" >&2
+        cat "$tmp/err" >&2
+        exit 1
+    fi
+    rm -rf "$tmp"
+}
+
+@test "a nested path under e2e-apps escalates instead of being read as a suite" {
+    # POSIX case matches `/` with `*`, so the hack/e2e-apps/ arm sees nested paths
+    # too. With an unanchored capture the sed turned
+    # hack/e2e-apps/fixtures/postgres.bats into the "suite" fixtures/postgres --
+    # a name no suite carries, so the outcome was right by accident while the
+    # reason line printed a path where a suite name belongs.
+    #
+    # Nothing nested exists there today, which is exactly why the rule has to
+    # state what it does with one instead of letting it fall out of a regex.
+    tmp=$(mktemp -d)
+    cp -r packages/core/platform/sources "$tmp/sources"
+    [ ! -d hack/e2e-apps/fixtures ]
+    for f in hack/e2e-apps/fixtures/postgres.bats hack/e2e-apps/helpers.sh; do
+        echo "$f" > "$tmp/diff"
+        output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources" 2>"$tmp/err")
+        assert_full_suite "$output"
+        if ! grep -q "select-e2e:.*shared material" "$tmp/err"; then
+            echo "a non-per-app path under e2e-apps must escalate as shared material; stderr was:" >&2
+            cat "$tmp/err" >&2
+            exit 1
+        fi
+        # The capture must never leak a path fragment into the suite name.
+        if grep -q "fixtures/postgres'" "$tmp/err"; then
+            echo "the reason line named a path where a suite name belongs; stderr was:" >&2
+            cat "$tmp/err" >&2
+            exit 1
+        fi
+    done
     rm -rf "$tmp"
 }
 
