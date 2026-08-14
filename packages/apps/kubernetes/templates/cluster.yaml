@@ -109,7 +109,15 @@ data:
        where lookup returns nil) that never prunes live objects: skip there.
        Discriminate on the adoption annotation, never on mere existence: the
        MachineDeployment always exists at render time, so an existence-only
-       guard would deadlock the routine upgrade (see helmreleases/ouroboros.yaml). */}}
+       guard would deadlock the routine upgrade (see helmreleases/ouroboros.yaml).
+
+       Scope: this guard lives in the etcd-present branch (the else of
+       `if not $etcd`), so it does NOT run during the awaiting-etcd window,
+       where the chart renders only the status beacon above. An owned+unpinned
+       MD is therefore not refused in that transient window. This is a
+       pre-existing narrow exposure, not introduced by the split (the pre-split
+       chart also rendered pools only in this same else branch), and it closes
+       as soon as etcd resolves and a real control-plane upgrade re-renders. */}}
 {{- if .Release.IsUpgrade }}
 {{-   if lookup "v1" "Namespace" "" .Release.Namespace }}
 {{-     $unadopted := list }}
