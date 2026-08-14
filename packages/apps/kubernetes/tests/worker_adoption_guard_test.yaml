@@ -27,7 +27,10 @@ suite: Phase 2 worker-pool adoption guard
 #     because the adopted-pool case is already exempted by P3's keep);
 #   - adopted onto its child release (child release-name + keep) -> renders,
 #     the real adopted-pool shape;
-#   - a MD from a different cluster -> renders (belt-and-braces P1).
+#   - owned + unpinned but naming a different cluster -> renders, sole
+#     discriminator P1 (synthetic: a real parent release only stamps
+#     same-cluster MDs, so this isolates the clusterName predicate);
+#   - a MD from a different cluster (both P1 and P2 false) -> renders.
 # cluster.yaml only ever looks up v1/Namespace (the canary) and
 # cluster.x-k8s.io/v1beta1/MachineDeployment, so the scheme registers exactly
 # those two kinds; the release Namespace object is planted so the canary
@@ -151,6 +154,33 @@ tests:
               meta.helm.sh/release-name: kubernetes-nodes-test-md0
           spec:
             clusterName: kubernetes-test
+    asserts:
+      - isKind:
+          of: KamajiControlPlane
+        documentSelector:
+          path: kind
+          value: KamajiControlPlane
+
+  - it: renders when an owned, unpinned MachineDeployment names a different cluster (isolates the clusterName predicate)
+    # Synthetic shape to isolate P1: parent release-name (P2 true) and no keep
+    # pin (P3 true), but spec.clusterName is NOT this release. A real parent
+    # release only ever stamps same-cluster MDs, so this pairing does not occur
+    # in practice; its sole purpose is to make the clusterName predicate the only
+    # reason the guard does not fire. Deleting P1 from cluster.yaml reddens this
+    # case (P2 and P3 alone would then flag it), which is what pins P1.
+    kubernetesProvider:
+      scheme: *scheme
+      objects:
+        - *nsObject
+        - kind: MachineDeployment
+          apiVersion: cluster.x-k8s.io/v1beta1
+          metadata:
+            name: kubernetes-test-other0
+            namespace: tenant-test
+            annotations:
+              meta.helm.sh/release-name: kubernetes-test
+          spec:
+            clusterName: some-other-cluster
     asserts:
       - isKind:
           of: KamajiControlPlane
