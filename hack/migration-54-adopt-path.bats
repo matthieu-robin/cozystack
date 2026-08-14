@@ -213,6 +213,44 @@ OBJS
   rm -rf "$WORK"
 }
 
+@test "a non-scalar value for a scalar nodeGroup field pins the live pool objects before skipping (no prune)" {
+  prep
+  # The group key and its map value are both well-formed, but a scalar field
+  # (here storageClass) is stored as an object -- reachable via kubectl edit,
+  # since the NodeGroup subfields were never fully schema-constrained. Copied
+  # verbatim into the child HR it would fail the KubernetesNodes schema and
+  # leave the child release stuck Failed, with the MD already re-annotated onto
+  # it. The bad-scalar guard must instead warn, pin the live pool objects with
+  # resource-policy=keep (so the parent's control-plane-only re-render cannot
+  # prune the running VMs), skip adoption (no child HR), and let the run stamp.
+  cat > "$FAKE_HR_LIST" <<'JSON'
+{"items":[{"metadata":{"namespace":"tenant-test","name":"kubernetes-test3"},"spec":{"values":{"nodeGroups":{"md0":{"minReplicas":1,"storageClass":{"name":"replicated"},"roles":["ingress-nginx"]}}}}}]}
+JSON
+  cat > "$FAKE_OBJS" <<'OBJS'
+machinedeployment.cluster.x-k8s.io kubernetes-test3-md0 kubernetes-test3
+machinehealthcheck.cluster.x-k8s.io kubernetes-test3-md0 kubernetes-test3
+workloadmonitor.cozystack.io kubernetes-test3-md0 kubernetes-test3
+kubevirtmachinetemplate.infrastructure.cluster.x-k8s.io kubernetes-test3-md0-abc123 kubernetes-test3
+OBJS
+  FAKE_KMT_NAMES=$(printf '%s' kubernetes-test3-md0-abc123)
+  export FAKE_KMT_NAMES
+  rc=0
+  bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
+  cat "$WORK/out"
+  [ "$rc" -eq 0 ]
+  grep -qiE 'non-scalar value' "$WORK/out"
+  # Live pool objects pinned with keep, no ownership transfer (no release-name).
+  grep -qE 'annotate machinedeployment.* kubernetes-test3-md0 .*resource-policy=keep' "$FAKE_CMDLOG"
+  grep -qE 'annotate machinehealthcheck.* kubernetes-test3-md0 .*resource-policy=keep' "$FAKE_CMDLOG"
+  grep -qE 'annotate workloadmonitor.* kubernetes-test3-md0 .*resource-policy=keep' "$FAKE_CMDLOG"
+  grep -qE 'annotate kubevirtmachinetemplate.* kubernetes-test3-md0-abc123 .*resource-policy=keep' "$FAKE_CMDLOG"
+  ! grep -qE 'meta.helm.sh/release-name' "$FAKE_CMDLOG"
+  # Adoption skipped, run completes and stamps.
+  ! grep -q 'APPLY-HR' "$FAKE_CMDLOG"
+  grep -qF -- "STAMP" "$FAKE_CMDLOG"
+  rm -rf "$WORK"
+}
+
 @test "an absent worker object is skipped and the run still completes and stamps" {
   prep
   # No FAKE_OBJS: every named get is absent -- under --ignore-not-found that is
