@@ -393,6 +393,62 @@ assert_full_suite() {
     rm -rf "$tmp"
 }
 
+@test "a top-level unit bats file selects nothing" {
+    # All 60 non-e2e hack/*.bats files used to escalate to the full suite. The
+    # root Makefile is the authority on which of them the e2e sandbox runs:
+    # BATS_UNIT_FILES := $(filter-out hack/e2e-%.bats,$(wildcard hack/*.bats))
+    # keeps exactly these for the unit lane, and packages/core/testing's recipes
+    # execute only the three it filters out. So the sandbox never runs one of
+    # these, and no Chainsaw suite can regress from an edit to one.
+    #
+    # Not a green gate with nothing behind it: `make unit-tests` DOES run them,
+    # gated on pull-requests.yaml's `code` output, which is computed there as
+    # "any path outside docs/" and never from this script.
+    tmp=$(mktemp -d)
+    cp -r packages/core/platform/sources "$tmp/sources"
+    # Premise, read off the Makefile rather than assumed: the unit set is the
+    # hack/*.bats files whose names do not start with e2e-, and the file under
+    # test has to be in it.
+    grep -Fq 'BATS_UNIT_FILES := $(filter-out hack/e2e-%.bats,$(wildcard hack/*.bats))' Makefile
+    printf '%s\n' hack/select-e2e_test.bats hack/md-no-hardwrap.bats > "$tmp/diff"
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources")
+    [ -z "$output" ]
+    # The e2e-prefixed ones are the sandbox's own harness and must still
+    # escalate; the narrowing lives one alternative away from them in
+    # full_suite_pattern, so pin both sides of the prefix.
+    for f in hack/e2e-install-cozystack.bats hack/e2e-prepare-cluster.bats hack/e2e-test-openapi.bats; do
+        echo "$f" > "$tmp/diff"
+        output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources" 2>/dev/null)
+        assert_full_suite "$output"
+    done
+    # And an inert unit bats file beside a real app path must not mask it.
+    printf '%s\n' hack/select-e2e_test.bats packages/apps/postgres/values.yaml > "$tmp/diff"
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources")
+    [ "$output" = "postgres" ]
+    rm -rf "$tmp"
+}
+
+@test "every hack/*.bats file lands on the lane its name says" {
+    # The rule above is a claim about 63 files, asserted on two of them. This
+    # pins the claim itself: for every hack/*.bats in the tree, the selector's
+    # verdict must agree with the Makefile's split -- e2e-prefixed escalates,
+    # everything else selects nothing. A file added with a name that fits neither
+    # lane's expectation shows up here rather than on the next PR that touches it.
+    tmp=$(mktemp -d)
+    cp -r packages/core/platform/sources "$tmp/sources"
+    full=$(full_suite_list)
+    for f in hack/*.bats; do
+        echo "$f" > "$tmp/diff"
+        output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources" 2>/dev/null)
+        case "$f" in
+            hack/e2e-*) want="$full" ;;
+            *)          want="" ;;
+        esac
+        assert_selection "wrong lane for $f" "$output" "$want"
+    done
+    rm -rf "$tmp"
+}
+
 @test "a per-app e2e bats file selects that app's suite" {
     # hack/e2e-apps/<name>.bats is the pre-Chainsaw per-app BATS suite, named
     # after the app exactly as a Chainsaw suite directory is. Those paths matched

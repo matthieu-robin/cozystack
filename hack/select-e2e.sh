@@ -76,7 +76,17 @@ SOURCES_DIR="${2:-packages/core/platform/sources}"
 #     the root Makefile, hack/*.mk (the tag/push/output flags of every image),
 #     hack/buildkitd.toml (the builder every image is built with), and hack/lib/
 #     (sourced by the hack/*.sh scripts that already escalate);
-#   - the e2e harness itself: hack/*.sh, hack/*.bats and hack/e2e-*.yaml;
+#   - the e2e harness itself: hack/*.sh, hack/e2e-*.bats and hack/e2e-*.yaml.
+#     The bats half is prefix-matched rather than taking every hack/*.bats,
+#     because the root Makefile splits those two sets by exactly that prefix —
+#     `BATS_UNIT_FILES := $(filter-out hack/e2e-%.bats,$(wildcard hack/*.bats))`
+#     — so the 60 files it keeps are the unit lane and the e2e sandbox runs none
+#     of them. The three it filters out are the ones packages/core/testing's
+#     recipes execute inside the sandbox, and they stay here. Narrowing this
+#     cannot leave a bats-only pull request untested: `make unit-tests` is gated
+#     on the `code` output, which pull-requests.yaml computes as "any path
+#     outside docs/" and never from this script, so those 60 files run on their
+#     own lane whatever the selection here is;
 #   - the workflows that RUN the suite — enumerated rather than matched by
 #     prefix, so an unrelated workflow does not burn a full run. Keep this list
 #     in step with `rg -l test-chainsaw .github/workflows/`.
@@ -94,7 +104,7 @@ SOURCES_DIR="${2:-packages/core/platform/sources}"
 #     alternative leaves them inert, which reads as an oversight rather than a
 #     decision. Reopen the trade if the full suite's flake rate makes the
 #     generic coverage cost more than it returns.
-full_suite_pattern='^(packages/library/|packages/core/|api/|cmd/|internal/|pkg/|tools/|hack/lib/|hack/[^/]+\.sh$|hack/[^/]+\.bats$|hack/[^/]+\.mk$|hack/buildkitd\.toml$|hack/e2e-[^/]+\.ya?ml$|go\.(mod|sum)$|Makefile$|\.github/workflows/(pull-requests|e2e-fork|e2e-tag|nightly)\.yaml$)'
+full_suite_pattern='^(packages/library/|packages/core/|api/|cmd/|internal/|pkg/|tools/|hack/lib/|hack/[^/]+\.sh$|hack/e2e-[^/]+\.bats$|hack/[^/]+\.mk$|hack/buildkitd\.toml$|hack/e2e-[^/]+\.ya?ml$|go\.(mod|sum)$|Makefile$|\.github/workflows/(pull-requests|e2e-fork|e2e-tag|nightly)\.yaml$)'
 
 # Paths with no bearing on what e2e exercises. Checked AFTER full_suite_pattern,
 # so a specific escalation wins over a broad directory here (.github/ is inert,
@@ -109,6 +119,15 @@ full_suite_pattern='^(packages/library/|packages/core/|api/|cmd/|internal/|pkg/|
 #   - .claude/ .gemini/  agent config, never shipped
 #   - img/            README assets
 #   - hack/testdata/  fixtures for the bats unit tests, not for e2e
+#   - hack/*.bats     the unit lane, minus the hack/e2e-*.bats escalated above.
+#                     The root Makefile draws the line at that prefix
+#                     (BATS_UNIT_FILES filters hack/e2e-%.bats out of
+#                     hack/*.bats), so these 60 files are never executed inside
+#                     the e2e sandbox and no Chainsaw suite can regress from one.
+#                     They are not untested by being inert here: `make
+#                     unit-tests` runs them, gated on pull-requests.yaml's `code`
+#                     output, which is "any path outside docs/" and is computed
+#                     in the workflow rather than from this script
 #   - packages/tests/ helm-unittest fixture charts. cozy-lib-tests exercises
 #                     library/cozy-lib from the outside; changing a test OF
 #                     cozy-lib does not change cozy-lib, no PackageSource lists
@@ -124,7 +143,7 @@ full_suite_pattern='^(packages/library/|packages/core/|api/|cmd/|internal/|pkg/|
 #                     beside a package does not read as an oversight; one under a
 #                     tree full_suite_pattern already covers (api/, internal/)
 #                     still escalates, since that pattern is checked first
-inert_config_pattern='^(examples/|\.github/|\.claude/|\.gemini/|img/|hack/testdata/|packages/tests/|hack/boilerplate\.go\.txt$|hack/dcgm-default-counters\.csv$|LICENSE$|\.gitignore$|\.pre-commit-config\.yaml$|\.coderabbit\.yaml$)|(^|/)\.gitattributes$'
+inert_config_pattern='^(examples/|\.github/|\.claude/|\.gemini/|img/|hack/testdata/|packages/tests/|hack/[^/]+\.bats$|hack/boilerplate\.go\.txt$|hack/dcgm-default-counters\.csv$|LICENSE$|\.gitignore$|\.pre-commit-config\.yaml$|\.coderabbit\.yaml$)|(^|/)\.gitattributes$'
 
 # All known Chainsaw suites: every dir under hack/e2e-chainsaw/ holding a
 # chainsaw-test.yaml (this excludes _lib/ and the top-level config files).
@@ -453,11 +472,12 @@ done
 final_apps=$(intersect_suites "$group_suites $selected_apps")
 
 # Backstop. Every graph path above either escalates or contributes a suite that
-# exists, so what still reaches this is a per-suite edit naming a directory that
-# holds no chainsaw-test.yaml — shared material beside _lib/, or a suite nested
-# deeper than the depth-2 scan looks. Selecting nothing for those would skip
-# E2E outright, so failing towards the full suite is the only safe way to be
-# wrong here.
+# exists, so what still reaches this is a directly-selected name that is not a
+# suite: a per-suite edit naming a directory that holds no chainsaw-test.yaml —
+# shared material beside _lib/, or a suite nested deeper than the depth-2 scan
+# looks — or a hack/e2e-apps/<name>.bats whose <name> no suite carries.
+# Selecting nothing for those would skip E2E outright, so failing towards the
+# full suite is the only safe way to be wrong here.
 #
 # group_suites is empty whenever this fires — every group either escalated above
 # or contributed a suite that exists — so the names worth naming are the
