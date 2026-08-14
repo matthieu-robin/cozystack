@@ -84,11 +84,11 @@ data:
        pre-upgrade hook, BEFORE this control-plane-only chart reconciles. If
        that migration never processed a pool (its version slot was already
        stamped, or it was renumbered out on a merge/backport), a live worker
-       MachineDeployment is still annotated to THIS parent release AND carries
-       no keep pin, and Helm's control-plane-only re-render would prune it and
-       cascade-delete the tenant's worker VMs. Refuse to render instead: the
-       upgrade blocks with a legible reason and the workers keep running on the
-       prior release until the migration runs.
+       MachineDeployment for this cluster is NOT owned by its kubernetes-nodes
+       child release AND carries no keep pin, and Helm's control-plane-only
+       re-render would prune it and cascade-delete the tenant's worker VMs.
+       Refuse to render instead: the upgrade blocks with a legible reason and
+       the workers keep running on the prior release until the migration runs.
 
        Exempt pools carrying helm.sh/resource-policy=keep. The migration pins
        keep on every pool it touches: on the ones it fully adopts (release-name
@@ -99,9 +99,16 @@ data:
        by design, so keep is the migration's "processed, made prune-proof"
        signature. A pinned MachineDeployment is already safe from Helm prune, so
        flagging it here would convert that documented degraded-but-running state
-       into a permanent upgrade deadlock. Only an MD owned by this release AND
-       unpinned means the migration never ran for this pool: that is the sole
-       data-loss case, and the only one this guard fails on.
+       into a permanent upgrade deadlock. The exemption keys on OWNERSHIP BY THE
+       CHILD RELEASE (release-name starts with kubernetes-nodes-<cluster>-), not
+       on "owned by this parent release": Helm's prune gates on resource-policy
+       alone and never consults the live release-name (see migration 54's
+       foreign-owner branch), so a same-cluster unpinned MD whose release-name is
+       empty or foreign (Helm annotations stripped out-of-band, or a DR restore
+       of the CAPI objects) is ALSO in the parent's prune set and ALSO lost.
+       Firing on "not child-owned AND unpinned" catches those alongside the
+       parent-owned case; only a pool already adopted or natively created by its
+       child release (child release-name) is exempt.
 
        Fail-closed like system/seaweedfs naming-guard: the release Namespace is
        a canary that always exists for a live install/upgrade, so an empty
@@ -121,13 +128,14 @@ data:
 {{- if .Release.IsUpgrade }}
 {{-   if lookup "v1" "Namespace" "" .Release.Namespace }}
 {{-     $unadopted := list }}
+{{-     $childPrefix := printf "kubernetes-nodes-%s-" (trimPrefix "kubernetes-" $.Release.Name) }}
 {{-     range $md := (lookup "cluster.x-k8s.io/v1beta1" "MachineDeployment" $.Release.Namespace "").items }}
-{{-       if and (eq (dig "spec" "clusterName" "" $md) $.Release.Name) (eq (dig "metadata" "annotations" "meta.helm.sh/release-name" "" $md) $.Release.Name) (ne (dig "metadata" "annotations" "helm.sh/resource-policy" "" $md) "keep") }}
+{{-       if and (eq (dig "spec" "clusterName" "" $md) $.Release.Name) (not (hasPrefix $childPrefix (dig "metadata" "annotations" "meta.helm.sh/release-name" "" $md))) (ne (dig "metadata" "annotations" "helm.sh/resource-policy" "" $md) "keep") }}
 {{-         $unadopted = append $unadopted (dig "metadata" "name" "" $md) }}
 {{-       end }}
 {{-     end }}
 {{-     if $unadopted }}
-{{-       fail (printf "kubernetes: refusing to render cluster %q control-plane-only: worker MachineDeployment(s) %v are still owned by this release and are not pinned with helm.sh/resource-policy=keep, so the Phase 2 worker-pool adoption migration never processed them. Rendering now would let Helm prune them and delete the tenant's worker VMs. Run the platform migration that adopts worker pools into KubernetesNodes before upgrading this cluster. A pool the migration deliberately left pinned-but-unadopted carries helm.sh/resource-policy=keep and is intentionally exempt from this guard." $.Release.Name $unadopted) }}
+{{-       fail (printf "kubernetes: refusing to render cluster %q control-plane-only: worker MachineDeployment(s) %v are not owned by their kubernetes-nodes child release and are not pinned with helm.sh/resource-policy=keep, so the Phase 2 worker-pool adoption migration never processed them. Helm prunes on resource-policy alone (not on the live release-name), so rendering now would let Helm prune them and delete the tenant's worker VMs. Run the platform migration that adopts worker pools into KubernetesNodes before upgrading this cluster. A pool the migration deliberately left pinned-but-unadopted carries helm.sh/resource-policy=keep and is intentionally exempt from this guard." $.Release.Name $unadopted) }}
 {{-     end }}
 {{-   end }}
 {{- end }}

@@ -1,10 +1,10 @@
 suite: Phase 2 worker-pool adoption guard
 
 # The guard in templates/cluster.yaml refuses to render the control-plane-only
-# chart when a live worker MachineDeployment for this cluster is still owned by
-# THIS parent release AND is not pinned with helm.sh/resource-policy=keep (the
-# adoption migration never processed it), so Helm cannot silently prune it and
-# delete the tenant's worker VMs.
+# chart when a live worker MachineDeployment for this cluster is NOT owned by
+# its kubernetes-nodes child release AND is not pinned with
+# helm.sh/resource-policy=keep (the adoption migration never processed it), so
+# Helm cannot silently prune it and delete the tenant's worker VMs.
 #
 # The guard keys on a live `lookup`. Under `helm template` / CI lint the lookup
 # returns nil, so the guard MUST be a no-op there even on an upgrade render;
@@ -12,12 +12,18 @@ suite: Phase 2 worker-pool adoption guard
 # through `kubernetesProvider` (the same technique as
 # kubernetes-nodes/tests/parent_version_skew_test.yaml) and pin the real
 # contract. The guard refuses render only when a MachineDeployment satisfies
-# ALL THREE predicates at cluster.yaml: spec.clusterName == release name (P1),
-# meta.helm.sh/release-name == release name (P2, owned by THIS parent), and
-# helm.sh/resource-policy != keep (P3, not pinned). Each render-expecting case
-# below isolates one predicate as its sole discriminator so that deleting that
+# ALL THREE predicates at cluster.yaml: spec.clusterName == release name (P1);
+# release-name does NOT start with the child prefix kubernetes-nodes-<cluster>-
+# (P2, "not owned by a child release"); and helm.sh/resource-policy != keep
+# (P3, not pinned). P2 is deliberately NOT "release-name == parent": Helm's
+# prune gates on resource-policy alone and never consults the live release-name
+# (see migration 54), so an empty or foreign release-name is just as prunable as
+# the parent's and must also be caught. Each render-expecting case below
+# isolates one predicate as its sole discriminator so that deleting that
 # predicate reddens at least one case (per-conjunct non-vacuity):
-#   - owned + unpinned (P1,P2,P3 all true) -> refuses render;
+#   - owned by parent + unpinned (P1,P2,P3 all true) -> refuses render;
+#   - empty/foreign release-name + unpinned, same cluster -> refuses render
+#     (the under-match regression case: parent==false yet Helm still prunes);
 #   - owned + pinned keep -> renders, sole discriminator P3 (a pool the
 #     migration deliberately left pinned-but-unadopted is prune-proof and must
 #     not deadlock the upgrade);
@@ -84,6 +90,28 @@ tests:
             namespace: tenant-test
             annotations:
               meta.helm.sh/release-name: kubernetes-test
+          spec:
+            clusterName: kubernetes-test
+    asserts:
+      - failedTemplate:
+          errorPattern: "refusing to render cluster"
+
+  - it: refuses to render when a same-cluster unpinned MachineDeployment has an empty release-name (Helm prunes on resource-policy, not on release-name)
+    # Under-match regression guard. A pre-split worker MD whose Helm annotations
+    # were stripped out-of-band (or restored by a DR tool that drops them) has an
+    # empty meta.helm.sh/release-name, so a guard keyed on release-name==parent
+    # would miss it, yet Helm still enters it into the parent's prune set and,
+    # seeing no keep, deletes it. P1 (clusterName) and P3 (no keep) are true and
+    # the release-name is not the child prefix, so the guard must refuse.
+    kubernetesProvider:
+      scheme: *scheme
+      objects:
+        - *nsObject
+        - kind: MachineDeployment
+          apiVersion: cluster.x-k8s.io/v1beta1
+          metadata:
+            name: kubernetes-test-md0
+            namespace: tenant-test
           spec:
             clusterName: kubernetes-test
     asserts:
