@@ -302,8 +302,20 @@ assert_full_suite() {
     tmp=$(mktemp -d)
     cp -r packages/core/platform/sources "$tmp/sources"
     echo "brand-new-top-level/thing.conf" > "$tmp/diff"
-    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources" 2>/dev/null)
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources" 2>"$tmp/err")
     assert_full_suite "$output"
+    # The reason line is asserted as well as the selection, and this branch is
+    # the one that most needs it: it is #3392's own guard, the escalation whose
+    # cause is hardest to work out from the outside (the answer is "a path nobody
+    # has classified", which the selection cannot express), and the only action it
+    # asks for is to go and classify the path it names. Deleting this echo used to
+    # leave the whole file green while the word "unclassified" appeared in seven
+    # comments here, so the branch read as covered without being pinned.
+    if ! grep -q "select-e2e:.*unclassified path.*thing\.conf" "$tmp/err"; then
+        echo "an unclassified path must be named on stderr; stderr was:" >&2
+        cat "$tmp/err" >&2
+        exit 1
+    fi
     rm -rf "$tmp"
 }
 
