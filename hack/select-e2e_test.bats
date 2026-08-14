@@ -132,8 +132,18 @@ assert_full_suite() {
     trap 'rm -rf "$tmp"' EXIT
     cp -r packages/core/platform/sources "$tmp/sources"
     echo "packages/library/cozy-lib/templates/_helpers.tpl" > "$tmp/diff"
-    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources")
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources" 2>"$tmp/err")
     assert_full_suite "$output"
+    # full_suite_pattern is the commonest escalation cause by a wide margin, so a
+    # full run with nothing on stderr leaves the usual answer to "why did
+    # everything run" out of the log entirely. Matched on the path and the rule
+    # name rather than on the word "escalating", which every other reason line
+    # here also prints.
+    if ! grep -q "select-e2e:.*cozy-lib.*full_suite_pattern" "$tmp/err"; then
+        echo "a full_suite_pattern match must name the path that caused it; stderr was:" >&2
+        cat "$tmp/err" >&2
+        exit 1
+    fi
 }
 
 @test "docs-only diff selects nothing" {
@@ -173,8 +183,13 @@ assert_full_suite() {
     trap 'rm -rf "$tmp"' EXIT
     cp -r packages/core/platform/sources "$tmp/sources"
     echo "hack/e2e-chainsaw/_lib/run-kubernetes.sh" > "$tmp/diff"
-    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources")
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources" 2>"$tmp/err")
     assert_full_suite "$output"
+    if ! grep -q "select-e2e:.*run-kubernetes.sh.*shared by every Chainsaw suite" "$tmp/err"; then
+        echo "a shared-Chainsaw escalation must name the file that caused it; stderr was:" >&2
+        cat "$tmp/err" >&2
+        exit 1
+    fi
 }
 
 @test "chainsaw config change triggers full suite" {
@@ -651,8 +666,41 @@ assert_full_suite() {
     # test would be measuring the ordinary per-suite rule.
     [ ! -d hack/e2e-chainsaw/_fixtures ]
     echo "hack/e2e-chainsaw/_fixtures/tenant.yaml" > "$tmp/diff"
-    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources")
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources" 2>"$tmp/err")
     assert_full_suite "$output"
+    # The backstop is the last branch that could reach the full suite without
+    # saying so. It names the directly-selected names it could not resolve, which
+    # for this diff is the directory the per-suite rule derived.
+    if ! grep -q "select-e2e:.*no runnable suite is named by.*_fixtures" "$tmp/err"; then
+        echo "the backstop must name what it could not resolve; stderr was:" >&2
+        cat "$tmp/err" >&2
+        exit 1
+    fi
+    rm -rf "$tmp"
+}
+
+@test "a packages/ path with no graph entry escalates and says which" {
+    # The fourth branch that used to escalate in silence: a path under
+    # packages/(apps|system|extra)/<name>/ that no PackageSource lists as a
+    # component path. That is how a new package looks before its source lands, so
+    # the line has to name the package dir rather than the rule — the reader's
+    # next step is to add it to the graph.
+    tmp=$(mktemp -d)
+    cp -r packages/core/platform/sources "$tmp/sources"
+    # Premise: no source may claim this path, or the graph lookup succeeds and
+    # the test measures the ordinary component rule instead.
+    if grep -rq 'path: system/zz-not-a-package' "$tmp/sources"; then
+        echo "premise broken: system/zz-not-a-package is in the graph" >&2
+        exit 1
+    fi
+    echo "packages/system/zz-not-a-package/values.yaml" > "$tmp/diff"
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources" 2>"$tmp/err")
+    assert_full_suite "$output"
+    if ! grep -q "select-e2e:.*system/zz-not-a-package.*component path" "$tmp/err"; then
+        echo "an unowned packages/ path must name itself; stderr was:" >&2
+        cat "$tmp/err" >&2
+        exit 1
+    fi
     rm -rf "$tmp"
 }
 

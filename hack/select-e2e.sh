@@ -41,6 +41,18 @@
 # the inert list" and it is the one to preserve: an empty selection is a
 # decision some rule reached, never a path nothing looked at.
 #
+# Every branch that escalates names its cause on stderr, and that is a contract
+# rather than a courtesy: the answer "run everything" is the same 21 suite names
+# whichever rule produced it, so without a reason line the only way to learn why
+# a pull request ran the whole suite is to re-derive the selection by hand. Four
+# of the seven were silent, full_suite_pattern — the commonest cause by a wide
+# margin — among them, which made the usual answer the one the log never had. A
+# test asserts each line, because a reason that regresses to silence changes no
+# selection and so is invisible to every other test here.
+#
+# The lines go to stderr, never stdout. stdout is the suite list and both lanes
+# parse it, so a reason line there would be read as a suite name.
+#
 # One caveat worth knowing before trusting that: inert_config_pattern makes
 # .github/ inert as a whole directory, and the e2e workflows are exempted by
 # NAME in full_suite_pattern, which is checked first. So a workflow added under
@@ -249,6 +261,7 @@ while IFS= read -r file || [ -n "$file" ]; do
   #    escalate to the full run.
   case "$file" in
     hack/e2e-chainsaw/_lib/*|hack/e2e-chainsaw/.chainsaw.yaml)
+      echo "select-e2e: '$file' is shared by every Chainsaw suite — escalating to the full suite" >&2
       trigger_full=1
       continue ;;
     hack/e2e-chainsaw/*/*.disabled)
@@ -287,6 +300,7 @@ while IFS= read -r file || [ -n "$file" ]; do
 
   # 3. Full-suite trigger
   if echo "$file" | grep -qE "$full_suite_pattern"; then
+    echo "select-e2e: '$file' cannot be scoped to one suite (full_suite_pattern) — escalating to the full suite" >&2
     trigger_full=1
     continue
   fi
@@ -310,6 +324,7 @@ while IFS= read -r file || [ -n "$file" ]; do
       trigger_any=1
     else
       # Inside packages/ but no graph entry — be conservative.
+      echo "select-e2e: no PackageSource in $SOURCES_DIR lists '$rel' as a component path — escalating to the full suite" >&2
       trigger_full=1
     fi
     continue
@@ -410,7 +425,14 @@ final_apps=$(intersect_suites "$group_suites $selected_apps")
 # deeper than the depth-2 scan looks. Selecting nothing for those would skip
 # E2E outright, so failing towards the full suite is the only safe way to be
 # wrong here.
+#
+# group_suites is empty whenever this fires — every group either escalated above
+# or contributed a suite that exists — so the names worth naming are the
+# directly-selected ones, and printing them says which directory or file the
+# selector could not resolve.
 if [ -z "$final_apps" ]; then
+  unmatched=$(echo "$selected_apps" | tr ' ' '\n' | sort -u | grep -v '^$' | paste -sd ' ' -)
+  echo "select-e2e: no runnable suite is named by '$unmatched' — escalating to the full suite" >&2
   escalate_to_full_suite
 fi
 
