@@ -386,7 +386,7 @@ kubectl get helmrelease --all-namespaces \
         | join(",")')
       if [ -n "$bad_scalar" ]; then
         echo "  WARNING: nodeGroup '$group' of cluster '$cluster' has non-scalar value(s) for field(s) [$bad_scalar]; pinning its objects with resource-policy=keep and skipping adoption" >&2
-        echo "  WARNING: remedy: restore the field(s) to a scalar on the parent Kubernetes CR's nodeGroups.$group, then re-run adoption" >&2
+        echo "  WARNING: remedy: restore the field(s) to a scalar on the parent Kubernetes CR's nodeGroups.$group, then recreate the pool; migration 54 has already stamped and will not re-run" >&2
         pin_pool_objects "$cluster" "$group" "$ns"
         continue
       fi
