@@ -251,6 +251,45 @@ OBJS
   rm -rf "$WORK"
 }
 
+@test "a child release name over 53 chars pins the live pool objects and skips, not deadlock on kubectl apply (no upgrade deadlock)" {
+  prep
+  # rest.go caps a cluster name at 42 chars, and the kubernetes-nodes- prefix
+  # (17 chars) plus a pool name can push the child HelmRelease name past Helm's
+  # 53-char limit. Here cluster 'production-eu-central-analytics01' (33) + pool
+  # 'md0' yields child name 'kubernetes-nodes-production-eu-central-analytics01-md0'
+  # (54 chars). Without the length guard the flow reaches `kubectl apply` of a
+  # >53-char HelmRelease name, the apiserver rejects it, and under set -e the
+  # run exits 1 before stamping -- deadlocking every tenant's platform upgrade.
+  # The overflow branch must instead warn, pin the live pool objects prune-proof,
+  # skip adoption (no child HR), and let the run complete and stamp.
+  cat > "$FAKE_HR_LIST" <<'JSON'
+{"items":[{"metadata":{"namespace":"tenant-test","name":"kubernetes-production-eu-central-analytics01"},"spec":{"values":{"nodeGroups":{"md0":{"minReplicas":1,"roles":["ingress-nginx"]}}}}}]}
+JSON
+  cat > "$FAKE_OBJS" <<'OBJS'
+machinedeployment.cluster.x-k8s.io kubernetes-production-eu-central-analytics01-md0 kubernetes-production-eu-central-analytics01
+machinehealthcheck.cluster.x-k8s.io kubernetes-production-eu-central-analytics01-md0 kubernetes-production-eu-central-analytics01
+workloadmonitor.cozystack.io kubernetes-production-eu-central-analytics01-md0 kubernetes-production-eu-central-analytics01
+kubevirtmachinetemplate.infrastructure.cluster.x-k8s.io kubernetes-production-eu-central-analytics01-md0-abc123 kubernetes-production-eu-central-analytics01
+OBJS
+  FAKE_KMT_NAMES=$(printf '%s' kubernetes-production-eu-central-analytics01-md0-abc123)
+  export FAKE_KMT_NAMES
+  rc=0
+  bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
+  cat "$WORK/out"
+  [ "$rc" -eq 0 ]
+  grep -qiE "exceeds Helm's 53-char limit" "$WORK/out"
+  # Live pool objects pinned with keep, no ownership transfer (no release-name).
+  grep -qE 'annotate machinedeployment.* kubernetes-production-eu-central-analytics01-md0 .*resource-policy=keep' "$FAKE_CMDLOG"
+  grep -qE 'annotate machinehealthcheck.* kubernetes-production-eu-central-analytics01-md0 .*resource-policy=keep' "$FAKE_CMDLOG"
+  grep -qE 'annotate workloadmonitor.* kubernetes-production-eu-central-analytics01-md0 .*resource-policy=keep' "$FAKE_CMDLOG"
+  grep -qE 'annotate kubevirtmachinetemplate.* kubernetes-production-eu-central-analytics01-md0-abc123 .*resource-policy=keep' "$FAKE_CMDLOG"
+  ! grep -qE 'meta.helm.sh/release-name' "$FAKE_CMDLOG"
+  # Adoption skipped (no child HR applied), run completes and stamps.
+  ! grep -q 'APPLY-HR' "$FAKE_CMDLOG"
+  grep -qF -- "STAMP" "$FAKE_CMDLOG"
+  rm -rf "$WORK"
+}
+
 @test "an absent worker object is skipped and the run still completes and stamps" {
   prep
   # No FAKE_OBJS: every named get is absent -- under --ignore-not-found that is
