@@ -518,8 +518,24 @@ final_apps=$(intersect_suites "$group_suites $selected_apps")
 # or contributed a suite that exists — so the names worth naming are the
 # directly-selected ones, and printing them says which directory or file the
 # selector could not resolve.
+#
+# Deduplicated in the shell rather than through `tr | sort -u | grep -v | paste`,
+# which is the same blindness this file fixes twice above: a pipeline reports its
+# LAST command's status, so a failing tr or sort would be invisible under set -e
+# and the message would name a partial list or nothing at all. That is only a
+# cosmetic loss — the escalation itself is already decided — but the reason line
+# is a contract now, and a contract that degrades silently is the thing this
+# change set exists to remove. Unquoted expansion is the split, `case` is the
+# membership test, and neither can half-succeed; it is also the idiom
+# resolve_suites already uses.
 if [ -z "$final_apps" ]; then
-  unmatched=$(echo "$selected_apps" | tr ' ' '\n' | sort -u | grep -v '^$' | paste -sd ' ' -)
+  unmatched=''
+  for a in $selected_apps; do
+    case " $unmatched " in
+      *" $a "*) ;;
+      *) unmatched="${unmatched:+$unmatched }$a" ;;
+    esac
+  done
   echo "select-e2e: no runnable suite is named by '$unmatched' — escalating to the full suite" >&2
   escalate_to_full_suite
 fi

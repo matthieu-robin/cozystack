@@ -900,6 +900,23 @@ assert_full_suite() {
         cat "$tmp/err" >&2
         exit 1
     fi
+    # Several unresolved directories, with one of them repeated: every distinct
+    # name must appear, exactly once, in one line. The list used to be built by
+    # `tr | sort -u | grep -v | paste`, whose exit status is paste's, so a failure
+    # anywhere earlier in it would have gone unseen under set -e and printed a
+    # partial name or none at all -- the same last-command blindness this script
+    # fixes for the suite list and the yq indexes. The escalation is already
+    # decided by then, so the only casualty is the reason line, which is exactly
+    # what these asserts exist to defend.
+    [ ! -d hack/e2e-chainsaw/_zz ]
+    printf '%s\n' hack/e2e-chainsaw/_fixtures/a.yaml \
+        hack/e2e-chainsaw/_fixtures/b.yaml \
+        hack/e2e-chainsaw/_zz/c.yaml > "$tmp/diff"
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources" 2>"$tmp/err")
+    assert_full_suite "$output"
+    line=$(grep 'no runnable suite is named by' "$tmp/err")
+    assert_selection "the backstop must name every unresolved directory once" \
+        "$line" "select-e2e: no runnable suite is named by '_fixtures _zz' — escalating to the full suite"
     rm -rf "$tmp"
 }
 
