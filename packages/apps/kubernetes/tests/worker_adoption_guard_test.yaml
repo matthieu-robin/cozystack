@@ -11,10 +11,24 @@ suite: Phase 2 worker-pool adoption guard
 # the first test pins that inertness. The remaining tests seed a live lookup
 # through `kubernetesProvider` (the same technique as
 # kubernetes-nodes/tests/parent_version_skew_test.yaml) and pin the real
-# contract: an owned+unpinned MD fails the render, an owned+pinned MD renders
-# (a pool the migration deliberately left pinned-but-unadopted is prune-proof
-# and must not deadlock the upgrade), and a MD adopted onto its child release
-# renders. cluster.yaml only ever looks up v1/Namespace (the canary) and
+# contract. The guard refuses render only when a MachineDeployment satisfies
+# ALL THREE predicates at cluster.yaml: spec.clusterName == release name (P1),
+# meta.helm.sh/release-name == release name (P2, owned by THIS parent), and
+# helm.sh/resource-policy != keep (P3, not pinned). Each render-expecting case
+# below isolates one predicate as its sole discriminator so that deleting that
+# predicate reddens at least one case (per-conjunct non-vacuity):
+#   - owned + unpinned (P1,P2,P3 all true) -> refuses render;
+#   - owned + pinned keep -> renders, sole discriminator P3 (a pool the
+#     migration deliberately left pinned-but-unadopted is prune-proof and must
+#     not deadlock the upgrade);
+#   - natively-created / greenfield pool: child release-name, NO keep pin ->
+#     renders, sole discriminator P2 (this is the routine post-split upgrade of
+#     every cluster, its highest-blast-radius path; without it P2 is untested
+#     because the adopted-pool case is already exempted by P3's keep);
+#   - adopted onto its child release (child release-name + keep) -> renders,
+#     the real adopted-pool shape;
+#   - a MD from a different cluster -> renders (belt-and-braces P1).
+# cluster.yaml only ever looks up v1/Namespace (the canary) and
 # cluster.x-k8s.io/v1beta1/MachineDeployment, so the scheme registers exactly
 # those two kinds; the release Namespace object is planted so the canary
 # resolves and the guard body runs.
@@ -108,6 +122,33 @@ tests:
             annotations:
               meta.helm.sh/release-name: kubernetes-nodes-test-md0
               helm.sh/resource-policy: keep
+          spec:
+            clusterName: kubernetes-test
+    asserts:
+      - isKind:
+          of: KamajiControlPlane
+        documentSelector:
+          path: kind
+          value: KamajiControlPlane
+
+  - it: renders for a natively-created pool (child release-name, no keep pin) so the routine post-split upgrade is not refused
+    # Greenfield / natively-created pool: the kubernetes-nodes child chart renders
+    # its own MachineDeployment with meta.helm.sh/release-name on the CHILD release
+    # and no helm.sh/resource-policy pin (the pin exists only on migration-adopted
+    # objects and is removed by pre-delete-unpin). P1 (clusterName) and P3 (no keep)
+    # are both true here, so P2 (owned by parent) is the ONLY predicate keeping this
+    # out of the refusal set. Deleting P2 from cluster.yaml reddens exactly this case.
+    kubernetesProvider:
+      scheme: *scheme
+      objects:
+        - *nsObject
+        - kind: MachineDeployment
+          apiVersion: cluster.x-k8s.io/v1beta1
+          metadata:
+            name: kubernetes-test-md0
+            namespace: tenant-test
+            annotations:
+              meta.helm.sh/release-name: kubernetes-nodes-test-md0
           spec:
             clusterName: kubernetes-test
     asserts:
