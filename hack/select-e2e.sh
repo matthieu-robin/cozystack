@@ -138,14 +138,27 @@ full_suite_pattern='^(packages/library/|packages/core/|api/|cmd/|internal/|pkg/|
 #                     packages/library/ in full_suite_pattern
 #   - boilerplate.go.txt / dcgm-default-counters.csv  codegen header; a CSV read
 #                     only by check-gpu-recording-rules.bats
-#   - *.gitattributes Every one in this tree marks generated files
-#                     `linguist-generated`, which is GitHub's language-stats and
-#                     diff-collapsing hint and reaches no build, chart or test.
-#                     Matched by name wherever it lives, so the next one added
-#                     beside a package does not read as an oversight; one under a
-#                     tree full_suite_pattern already covers (api/, internal/)
-#                     still escalates, since that pattern is checked first
-inert_config_pattern='^(examples/|\.github/|\.claude/|\.gemini/|img/|hack/testdata/|packages/tests/|hack/[^/]+\.bats$|hack/boilerplate\.go\.txt$|hack/dcgm-default-counters\.csv$|LICENSE$|\.gitignore$|\.pre-commit-config\.yaml$|\.coderabbit\.yaml$)|(^|/)\.gitattributes$'
+#   - the three .gitattributes  ENUMERATED, not matched by name. Every
+#                     .gitattributes in this tree holds nothing but
+#                     `linguist-generated` markers — GitHub's language-stats and
+#                     diff-collapsing hint, which reaches no build, chart or test
+#                     — and these are the three whose classification the entry
+#                     changes; the two under api/ and internal/ are escalated by
+#                     full_suite_pattern first, so an entry for them would be
+#                     dead. The justification is about what these files CONTAIN,
+#                     and the file name does not carry it: .gitattributes can also
+#                     set `filter`, `eol`, `working-tree-encoding` and
+#                     `export-subst`, every one of which changes what lands in the
+#                     working tree and therefore what gets built, so a by-name
+#                     rule would silently make a live file inert. Same trade as
+#                     the workflow enumeration above, and the same upkeep: after
+#                     adding or moving one, re-check with
+#                     `git ls-files '*.gitattributes' '.gitattributes'` and
+#                     confirm the contents are still only linguist markers. A
+#                     .gitattributes NOT on this list is classified by whatever
+#                     rule its path falls under — the graph, or the unclassified
+#                     fall-through — both of which fail safe
+inert_config_pattern='^(examples/|\.github/|\.claude/|\.gemini/|img/|hack/testdata/|packages/tests/|hack/[^/]+\.bats$|hack/boilerplate\.go\.txt$|hack/dcgm-default-counters\.csv$|LICENSE$|\.gitignore$|\.pre-commit-config\.yaml$|\.coderabbit\.yaml$|packages/system/\.gitattributes$|packages/system/(backup-controller|backupstrategy-controller)/definitions/\.gitattributes$)'
 
 # All known Chainsaw suites: every dir under hack/e2e-chainsaw/ holding a
 # chainsaw-test.yaml (this excludes _lib/ and the top-level config files).

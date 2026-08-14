@@ -554,21 +554,32 @@ assert_full_suite() {
     rm -rf "$tmp"
 }
 
-@test "helm-unittest fixtures and gitattributes select nothing" {
+@test "helm-unittest fixtures and the enumerated gitattributes select nothing" {
     # packages/tests/ is a helm-unittest fixture chart: changing a test OF
     # cozy-lib does not change cozy-lib, no PackageSource lists these paths as a
-    # component, and nothing installs them. Every .gitattributes in the tree
-    # marks generated files linguist-generated, which reaches no build, chart or
-    # test. Both classes fell through as unclassified and bought a full run --
-    # 6 of the last 150 merged pull requests between them.
+    # component, and nothing installs them. The .gitattributes named here hold
+    # nothing but linguist-generated markers, which reach no build, chart or test.
+    # Both classes fell through as unclassified and bought a full run -- 6 of the
+    # last 150 merged pull requests between them.
     tmp=$(mktemp -d)
     cp -r packages/core/platform/sources "$tmp/sources"
     printf '%s\n' packages/tests/cozy-lib-tests/tests/quota_test.yaml \
         packages/tests/cozy-lib-tests/templates/tests/quota.yaml \
         packages/system/.gitattributes \
-        .gitattributes > "$tmp/diff"
+        packages/system/backup-controller/definitions/.gitattributes \
+        packages/system/backupstrategy-controller/definitions/.gitattributes > "$tmp/diff"
     output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources")
     [ -z "$output" ]
+    # The .gitattributes rule is an ENUMERATION and must stay one. The
+    # justification is what those files contain, and the filename does not carry
+    # it -- .gitattributes can also set filter, eol, working-tree-encoding and
+    # export-subst, each of which changes what lands in the working tree and so
+    # what gets built. A by-name rule would make such a file inert in silence, so
+    # pin that a path not on the list is still classified by its own rule: at the
+    # repo root that is the unclassified fall-through.
+    echo ".gitattributes" > "$tmp/diff"
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources" 2>/dev/null)
+    assert_full_suite "$output"
     # The library itself is a different question and must still escalate: these
     # fixtures test cozy-lib, so an inert rule reaching the library would be the
     # dangerous over-reach here.
