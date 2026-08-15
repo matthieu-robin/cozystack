@@ -1,4 +1,5 @@
 {{- /* Gated on the same condition as certmanager.yaml: the source Secret only exists when TLS is on. */}}
+{{- /* cert-manager writes the certificate of a selfSigned isCA Certificate to ca.crt as well as to tls.crt, and ca.crt is the key the trust-anchor contract names. */}}
 {{- if eq (include "nats.tls.enabled" .) "true" }}
 ---
 apiVersion: internal.cozystack.io/v1alpha1
