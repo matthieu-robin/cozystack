@@ -64,7 +64,7 @@ When TLS is on, the chart issues a self-signed CA and a server certificate from 
 
 **Retrieving the CA certificate** for client verification:
 
-The trust anchor is published as `nats-<name>.tenant-ca`: an object holding `ca.crt` and nothing else, delivered to tenants through the `core.cozystack.io/tenantsecrets` API that the base tenant roles already grant.
+The trust anchor is published as `nats-<name>.tenant-ca`: an object holding `ca.crt` and nothing else, delivered to tenants through the `core.cozystack.io/tenantsecrets` API that the base tenant roles already grant. It exists only while TLS is on, because that is the only state in which the chart issues a CA to publish.
 
 ```bash
 kubectl --context <ctx> --namespace <tenant> \
