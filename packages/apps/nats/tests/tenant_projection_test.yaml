@@ -35,11 +35,19 @@ tests:
           path: metadata.name
           value: my-nats-ca
 
-  - it: declares a CACert projection of the chart's CA
+  # The list length is asserted alongside the entry: hasDocuments counts
+  # documents, not list entries, so a second entry naming tls.key as its source
+  # renders inside this same document and leaves every other assertion here
+  # untouched. The controller refuses a multi-entry sentinel outright, which
+  # makes that a silent loss of the anchor rather than a leak.
+  - it: declares exactly one projection, of the chart's CA
     set:
       tls:
         enabled: true
     asserts:
+      - lengthEqual:
+          path: spec.projections
+          count: 1
       - equal:
           path: spec.projections[0].type
           value: CACert
