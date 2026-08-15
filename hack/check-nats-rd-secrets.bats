@@ -14,8 +14,12 @@
 # happens to occupy the name.
 #
 # These assertions exist because both halves are one edit away from breaking
-# with a fully green chart suite: helm-unittest covers the chart templates, and
-# neither the ResourceDefinition nor the dashboard Role is a chart template.
+# with a fully green chart suite, for two different reasons. The
+# ResourceDefinition is rendered, by the nats-rd chart inlining cozyrds/*, but
+# that chart carries neither a tests directory nor the test target
+# hack/helm-unit-tests.sh looks for, and no packages/system/*-rd package does.
+# The dashboard Role is rendered by a chart that has both, and no suite under
+# packages/apps/nats/tests/ asserts on it.
 #
 # The grants are asserted as WHITELISTS against rendered output rather than as
 # a blacklist of forbidden names over source text. A blacklist grepping for
@@ -27,11 +31,26 @@ REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME:-$0}")/.." && pwd)"
 COZYRDS="$REPO_ROOT/packages/system/nats-rd/cozyrds/nats.yaml"
 CHART="$REPO_ROOT/packages/apps/nats"
 
-# Secret names the tenant is allowed to hold by NAME. Credentials only: the
-# trust anchor is reached by label, through the tenantsecrets API.
-EXPECTED_RD_NAMES='nats-{{ .name }}-credentials'
-EXPECTED_ROLE_NAMES='nats-test-credentials'
+# The complete set of grants the tenant holds, asserted as one value rather than
+# per-dimension: a name whitelist alone passes an added label selector, and a
+# label whitelist alone passes an added name. Either dimension can reach a
+# key-bearing Secret -- controller.cert-manager.io/fao is stamped on both of
+# them, so a selector on it is a one-line grant of the CA private key.
+EXPECTED_RD_INCLUDE='[{"resourceNames":["nats-{{ .name }}-credentials"]},{"matchLabels":{"internal.cozystack.io/tenant-ca":"true"}}]'
 
+# The dashboard template's entire RBAC output: every rule of the Role, and the
+# kinds it renders. Asserted whole rather than filtered down to the rules that mention
+# secrets, because every filter admits the spelling it did not anticipate: a rule
+# with no resourceNames names no Secret, a rule with resources ["*"] names no
+# resource, and a ClusterRole is not a Role. Each of those reaches both
+# key-bearing Secrets. There is no filter that is right for all of them, and one
+# comparison against the whole output needs none.
+EXPECTED_ROLE_RULES='[{"apiGroups":[""],"resources":["services"],"resourceNames":["nats-test"],"verbs":["get","list","watch"]},{"apiGroups":[""],"resources":["secrets"],"resourceNames":["nats-test-credentials"],"verbs":["get","list","watch"]},{"apiGroups":["cozystack.io"],"resources":["workloadmonitors"],"resourceNames":["nats-test"],"verbs":["get","list","watch"]}]'
+EXPECTED_RBAC_KINDS='["Role","RoleBinding"]'
+
+# Subsumed by the whitelist below, which cannot match without this entry. Kept
+# because the runner stops at the first failing test, so this one fires first
+# and says what the loss costs rather than printing two JSON blobs to diff.
 @test "nats-rd cozyrds selects the key-free tenant-CA projection by label" {
   if [ ! -f "$COZYRDS" ]; then
     echo "ResourceDefinition not found at $COZYRDS -- did it move?" >&2
@@ -49,28 +68,26 @@ EXPECTED_ROLE_NAMES='nats-test-credentials'
   fi
 }
 
-@test "nats-rd cozyrds grants no Secret by name except the credentials Secret" {
+@test "nats-rd cozyrds grants nothing beyond the credentials Secret and the trust anchor" {
   if [ ! -f "$COZYRDS" ]; then
     echo "ResourceDefinition not found at $COZYRDS -- did it move?" >&2
     exit 1
   fi
 
-  names=$(yq eval \
-    '[.spec.secrets.include[].resourceNames // [] | .[]] | sort | join(",")' \
-    "$COZYRDS") || exit 1
+  include=$(yq eval --output-format=json --indent=0 '.spec.secrets.include' "$COZYRDS") || exit 1
 
-  if [ "$names" != "$EXPECTED_RD_NAMES" ]; then
-    echo "Unexpected resourceNames in nats-rd spec.secrets.include: $names" >&2
-    echo "Expected exactly: $EXPECTED_RD_NAMES" >&2
+  if [ "$include" != "$EXPECTED_RD_INCLUDE" ]; then
+    echo "Unexpected nats-rd spec.secrets.include: $include" >&2
+    echo "Expected exactly: $EXPECTED_RD_INCLUDE" >&2
     echo "nats-<name>-ca holds the CA private key and nats-<name>-tls the server key;" >&2
-    echo "neither may be granted to a tenant." >&2
+    echo "neither may be granted to a tenant, by name or by label." >&2
     exit 1
   fi
 }
 
 # Asserted against RENDERED output, so the spelling used in the template --
 # quoted, helper-derived, or otherwise -- cannot smuggle a name past the check.
-@test "nats dashboard Role grants no Secret by name except the credentials Secret" {
+@test "nats dashboard Role renders exactly the grants it is supposed to" {
   if [ ! -d "$CHART" ]; then
     echo "Chart not found at $CHART -- did it move?" >&2
     exit 1
@@ -87,24 +104,30 @@ EXPECTED_ROLE_NAMES='nats-test-credentials'
     exit 1
   }
 
-  names=$(printf '%s\n' "$rendered" | yq eval \
-    '[select(.kind == "Role") | .rules[] | select(.resources[] == "secrets") | .resourceNames[]] | sort | join(",")' \
-    -) || exit 1
+  # eval-all aggregates the documents into one result, so the Role may sit at any
+  # position among them.
+  kinds=$(printf '%s\n' "$rendered" | yq eval-all --output-format=json --indent=0 \
+    '[.kind]' -) || exit 1
 
-  # Fail closed: an empty result means the Role stopped granting Secrets at all,
-  # or the render silently produced nothing. Either way this guard is no longer
-  # observing what it claims to observe.
-  if [ -z "$names" ]; then
-    echo "No secrets grant found in the rendered dashboard Role -- guard is blind." >&2
+  if [ "$kinds" != "$EXPECTED_RBAC_KINDS" ]; then
+    echo "Unexpected RBAC kinds rendered by the nats dashboard template: $kinds" >&2
+    echo "Expected exactly: $EXPECTED_RBAC_KINDS" >&2
+    echo "A ClusterRole here would grant across namespaces and is not covered by" >&2
+    echo "the rule comparison below, which reads the namespaced Role." >&2
     exit 1
   fi
 
-  if [ "$names" != "$EXPECTED_ROLE_NAMES" ]; then
-    echo "Unexpected Secret grants in the nats dashboard Role: $names" >&2
-    echo "Expected exactly: $EXPECTED_ROLE_NAMES" >&2
+  # Fails closed on an empty list: a Role that stopped granting anything, or a
+  # render that silently produced nothing, does not match the expected rules.
+  rules=$(printf '%s\n' "$rendered" | yq eval-all --output-format=json --indent=0 \
+    '[select(.kind == "Role") | .rules[]]' -) || exit 1
+
+  if [ "$rules" != "$EXPECTED_ROLE_RULES" ]; then
+    echo "Unexpected rules in the nats dashboard Role: $rules" >&2
+    echo "Expected exactly: $EXPECTED_ROLE_RULES" >&2
     echo "nats-<release>-ca holds the CA PRIVATE KEY and nats-<release>-tls the" >&2
     echo "server private key. The trust anchor reaches the tenant as the key-free" >&2
-    echo "<release>.tenant-ca projection via tenantsecrets, not by a name grant." >&2
+    echo "<release>.tenant-ca projection via tenantsecrets, not by a Role grant." >&2
     exit 1
   fi
 }
