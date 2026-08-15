@@ -145,9 +145,15 @@ tests:
   # Both Certificates below mint a private key: the CA Secret stores the CA key
   # under tls.key, the leaf Secret the server key. The nats ResourceDefinition
   # grants tenants read access to Secrets matching
-  # internal.cozystack.io/tenant-ca, so stamping either visibility label here
-  # would hand that key to every tenant subject. Only the controller-authored
-  # projection may carry them.
+  # internal.cozystack.io/tenant-ca, so only the controller-authored projection
+  # may carry that label.
+  #
+  # A stamp here does not by itself reach a tenant today: tenantsecrets serves
+  # only objects the lineage webhook marked tenantresource=true, and it resolves
+  # lineage from ownerReferences or the Flux helm labels, neither of which a
+  # cert-manager Secret carries while enableCertificateOwnerRef stays false.
+  # These assertions become load-bearing the moment either of those changes, and
+  # the second gate is not one this chart controls.
   #
   # Selected by the Secret each Certificate writes rather than by position: a
   # documentIndex would follow the slot, so reordering this template would let
