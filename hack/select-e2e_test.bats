@@ -92,6 +92,45 @@ assert_full_suite() {
     fi
 }
 
+@test "cozystack-basics does not narrow to a suite that lands downstream of it" {
+    # The other install-ordering hub. Its edges exist so a namespace or a
+    # platform-wide policy is in place first, and it reaches no suite today, so
+    # it escalates. The hazard is what happens when a suite DOES land downstream:
+    # the walk would carry cozystack-basics into it and the platform's
+    # namespace-and-policy package would run that one suite instead of
+    # everything. Seeded here rather than waited for, by giving an app that owns
+    # a real suite an edge onto the hub — the shape #3426 produces for real,
+    # where enabling the site-router suite takes cozystack-basics from the full
+    # run to `site-router` alone.
+    tmp=$(mktemp -d)
+    cp -r packages/core/platform/sources "$tmp/sources"
+    yq -i '.spec.variants[0].dependsOn += ["cozystack.cozystack-basics"]' \
+        "$tmp/sources/redis-application.yaml"
+    # Premise: the seeded edge is the thing under test, so a redis change must
+    # still select redis. Without it the assertion below passes on an empty
+    # graph.
+    echo "packages/apps/redis/values.yaml" > "$tmp/diff"
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources")
+    echo "$output" | grep -wq redis
+    echo "packages/system/cozystack-basics/values.yaml" > "$tmp/diff"
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources")
+    assert_full_suite "$output"
+    rm -rf "$tmp"
+}
+
+@test "a CDI change selects the suite that exercises a VMDisk" {
+    # kubevirt-cdi reaches vm-disk-application and nothing else runnable, so
+    # until vm-disk-application mapped to a suite every CDI change ran all of
+    # them. The vminstance suite creates a VMDisk and asserts the DataVolume
+    # behind it, so it is the suite that covers CDI.
+    tmp=$(mktemp -d)
+    cp -r packages/core/platform/sources "$tmp/sources"
+    echo "packages/system/kubevirt-cdi/values.yaml" > "$tmp/diff"
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources")
+    [ "$output" = "vminstance" ]
+    rm -rf "$tmp"
+}
+
 @test "a CNI change selects every suite the graph can reach" {
     # Named for what it measures rather than for the full suite it once claimed.
     # `packages/system/cilium` is owned by cozystack.networking and resolves

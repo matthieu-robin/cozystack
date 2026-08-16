@@ -228,6 +228,13 @@ escalate_to_full_suite() {
 src_to_suites() {
   case "$1" in
     vm-instance-application) echo vminstance ;;
+    # The vminstance suite creates a VMDisk and asserts the DataVolume behind it
+    # (hack/e2e-chainsaw/vminstance/vmdisk.yaml, vmdisk-vmi.yaml), so it is the
+    # suite that covers this source and everything reaching it, kubevirt-cdi
+    # included. Without the entry the source maps to a `vm-disk` suite that does
+    # not exist, is dropped by intersect_suites(), and a CDI change reaches
+    # nothing runnable through it.
+    vm-disk-application) echo vminstance ;;
     kubernetes-application) echo "kubernetes-latest kubernetes-previous kubernetes-oidc-system kubernetes-oidc-customconfig" ;;
     securitygroup-controller) echo securitygroup ;;
     *-application) echo "${1%-application}" ;;
@@ -254,8 +261,23 @@ build_owners_index() {
 # the engine reachable but stops it propagating selection downstream. A change to
 # the engine itself still triggers the full suite: its group reaches no suite, so
 # the per-path escalation below fires on it.
+#
+# cozystack.cozystack-basics is the second hub of that kind and is excluded for
+# the same reason. Every edge into it exists so a namespace or a platform-wide
+# policy is in place before the dependent installs — kubevirt-cdi says so in its
+# own source ("Depend on cozystack-basics so the target namespace exists
+# first") — which is install ordering, not behavior. It is also the hub where
+# treating the edge as behavioral does the most damage, and in the wrong
+# direction: cozystack-basics reaches no suite today, so it escalates, but it
+# sits upstream of kubevirt-cdi, so the FIRST suite that lands downstream of CDI
+# silently converts the platform's namespace-and-policy package from the full
+# run to that one suite. Reproduced on #3426, where enabling the site-router
+# suite takes cozystack-basics from 22 suites to `site-router` alone. Dropping
+# the reverse edges keeps the package reachable and stops it propagating
+# selection downstream, and a change to it still runs everything through the
+# per-path escalation.
 build_reverse_deps() {
-  yq -rN '.metadata.name as $n | .spec.variants[]?.dependsOn[]? | select(. != null and . != "" and . != "cozystack.cozystack-engine") | . + "\t" + $n' "$SOURCES_DIR"/*.yaml
+  yq -rN '.metadata.name as $n | .spec.variants[]?.dependsOn[]? | select(. != null and . != "" and . != "cozystack.cozystack-engine" and . != "cozystack.cozystack-basics") | . + "\t" + $n' "$SOURCES_DIR"/*.yaml
 }
 
 # Each index is one yq, and `OWNERS=$(build_owners_index | sort -u)` reports
