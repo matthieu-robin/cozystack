@@ -126,5 +126,20 @@ JSON
   [ "$(jq -r '.metadata.name' "$FAKE_CHILD_HR")" = "kubernetes-nodes-test3-md0" ]
   [ "$(jq -r '.spec.values.minReplicas' "$FAKE_CHILD_HR")" = "0" ]
   [ "$(jq -r '.spec.values.roles[0]' "$FAKE_CHILD_HR")" = "ingress-nginx" ]
+  # DEFAULT_MD0 is the sole source of the implicit pool's shape, and the fields
+  # below feed the content-hashed KubevirtMachineTemplate (kubernetes-nodes
+  # nodegroup.yaml). An edit to any of them re-hashes the KMT and silently rolls
+  # every implicit-md0 pool in the fleet on the next upgrade; no other assertion
+  # here catches it (name/minReplicas/role do not enter the hash). Pin the
+  # pre-split md0 values so such an edit reds this case instead of shipping.
+  [ "$(jq -r '.spec.values.instanceType' "$FAKE_CHILD_HR")" = "u1.medium" ]
+  [ "$(jq -r '.spec.values.diskSize' "$FAKE_CHILD_HR")" = "20Gi" ]
+  [ "$(jq -c '.spec.values.resources' "$FAKE_CHILD_HR")" = "{}" ]
+  [ "$(jq -c '.spec.values.gpus' "$FAKE_CHILD_HR")" = "[]" ]
+  [ "$(jq -c '.spec.values.kubelet' "$FAKE_CHILD_HR")" = "{}" ]
+  # storageClass "" in DEFAULT_MD0 falls through to the (absent here) cluster-
+  # level value, so the child carries no storageClass key — the pre-split md0
+  # shape, where md0 rendered with the chart's empty-string default.
+  [ "$(jq -r '.spec.values.storageClass // "ABSENT"' "$FAKE_CHILD_HR")" = "ABSENT" ]
   rm -rf "$WORK"
 }
