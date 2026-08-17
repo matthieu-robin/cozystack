@@ -13,7 +13,7 @@ spec:
   - name: tenant-kubernetes-previous-version
     try:
     - script:
-        # The on-failure diagnostics phase carries its own 8m wall-clock budget
+        # The on-failure diagnostics phase carries its own 7m wall-clock budget
         # (COZY_DIAG_PHASE_BUDGET in _lib/run-kubernetes.sh): once it is spent, the
         # collectors that have not started are declined out loud rather than
         # attempted, so the in-process tenant crust-gather snapshot, the one the
@@ -26,9 +26,15 @@ spec:
         # so that a budget running out drops the collectors that cost minutes rather
         # than the reads that discriminate between failure modes:
         #   node-join diagnostics reads
-        #   serial-console family (~5m50s at worst, ~3m30s at the pool's minimum)
+        #   worker network counters
+        #   serial-console family (~6m25s at worst, ~4m05s at the pool's minimum)
+        #   worker CPU usage and throttling counters, two samples
+        #   sandbox node CPU time, two samples
+        #   worker per-thread CPU time inside virt-launcher, two samples
+        #     (those alternate rather than run to completion in turn: each takes
+        #     its first reading, one wait passes, each takes its second)
         #   guest Talos capture
-        #   ghcr-mirror state + access log dump
+        #   ghcr-mirror state, access log and warm-up Job
         #   talos-image-cache diagnosis
         # and then, after the phase rather than inside it, the in-process tenant
         # crust-gather snapshot.
