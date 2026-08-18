@@ -2629,6 +2629,454 @@ cozy_capture_sandbox_qemu_thread_cpu() {
   fi
 }
 
+# How much work one canary arm does, and how long it may take doing it.
+#
+# Constants rather than knobs, and assigned unconditionally so they stay that
+# way: the legend states an expected duration against exactly these figures, so
+# a run that quietly used other ones would publish a range that was never true
+# of it.
+#
+# Sized so each arm takes about a second on a fast core: short enough that the
+# pair costs a few seconds of one core there, long enough that the 10ms clock
+# below is about a percent of the figure. Slower cores take proportionally
+# longer, up to the ceiling below, and the expected ranges the legend states are
+# where that is written down.
+COZY_CANARY_CPU_ITERATIONS=30000000
+# Declared in MiB and passed to dd in bytes. A suffix would be read differently
+# by the dd of the machine that happens to run this -- the sandbox image ships
+# the GNU one, where M is 1048576 while MB is a million, and dds elsewhere
+# disagree about which spellings they accept at all -- so the multiplication
+# happens here, where the unit the rate is reported in is the unit the constant
+# is written in.
+COZY_CANARY_MEM_BLOCK_MIB=64
+COZY_CANARY_MEM_BLOCKS=128
+# The rate below which an arm is pathological rather than merely slow, in the
+# unit that arm's rate is printed in. The legend prints both figures from these
+# two constants, so the number a reader is given is the number the collector
+# compares against. The sentences around them describe how each floor sits
+# against its band in words, and those are written rather than derived, so they
+# are the part that can go stale when a constant moves.
+#
+# Both sit under the healthy band rather than at its edge, and how far under is
+# what the ceiling limits. A floor an arm cannot reach before the ceiling stops
+# it never fires: the arm is cut off before its rate can fall that far, so every
+# alert arrives as the ceiling and carries a bound instead of the slowdown the
+# floor was meant to name. The memory arm crosses 500 MiB/s at 16.4s against the
+# 20s ceiling, under that band's own bottom of 8192 MiB in about eight seconds
+# rather than at it, so a core sitting at the bottom reads slow and raises
+# nothing where a floor placed at the bottom would have called that core
+# pathological on a green run. The compute arm has room for the full decade: a
+# tenth of a healthy mawk needs 10s, which is half the ceiling. Both
+# floors are set downwards on purpose -- the rate is printed in the capture
+# either way, so an alert this collector fails to raise costs less than one it
+# manufactures on a healthy machine. hack/run-kubernetes-runner-canary_test.bats
+# derives both crossings from these constants and fails when either leaves that
+# window.
+COZY_CANARY_CPU_MIN_RATE=3000000
+COZY_CANARY_MEM_MIN_RATE=500
+# The canary is work rather than a read, so it takes a ceiling of its own
+# instead of COZY_DIAG_READ_TIMEOUT. That bound is sized for an apiserver that
+# answers in under a second and lowering it is what the knob is for, which would
+# kill a canary meant to take seconds -- and unlike a read, a slow run here is
+# the finding rather than a lost one. This number is therefore the largest
+# slowdown the capture can still put a figure on: at the sizes above it stops an
+# arm an order of magnitude or more past the expected duration, past the factor
+# being hunted and short of spending the diagnostics budget on it.
+COZY_CANARY_RUN_BOUND_DEFAULT=20
+
+# The canary clock: /proc/uptime, in centiseconds, into _COZY_CANARY_CS.
+#
+# A global rather than a printed value, because the alternative is a command
+# substitution and that is a fork inside the interval being measured, at both
+# ends of every arm.
+#
+# /proc/uptime rather than `date`, and not for portability: the field is a
+# monotonic count no clock adjustment moves, and `read` is a builtin, so taking
+# the stamp costs no process. What it costs is resolution -- the kernel prints
+# hundredths -- which is why every duration here is quantised to 10ms and why
+# the legend says so.
+_cozy_canary_stamp() {
+  local raw='' rest='' secs='' frac=''
+
+  # The suppression goes ahead of the redirect rather than after it: applied in
+  # order, a missing file would otherwise put the shell error on the real stderr
+  # before the suppression took effect, and this function reports its own
+  # failures by returning rather than by printing.
+  read -r raw rest 2>/dev/null <"${COZY_DIAG_RUNNER_PROC_UPTIME:-/proc/uptime}" || return 1
+  # Refused unless the shape is exactly the one the arithmetic below is written
+  # for. A field with no decimal point is what this catches, and the only shape
+  # it catches: `${raw#*.}` hands back the whole string when there is no `.`, so
+  # a two-digit whole-second uptime passes the hundredths guard below as its own
+  # hundredths and ten seconds reads as 1010 centiseconds -- a duration off by a
+  # percent, manufactured by the one clock every figure here divides by. A field
+  # carrying three decimals never reaches the arithmetic at all: it is refused
+  # by that hundredths guard rather than by this one.
+  case "${raw}" in
+    *.*) ;;
+    *) return 1 ;;
+  esac
+  secs="${raw%%.*}"
+  frac="${raw#*.}"
+  case "${secs}" in
+    0 | [1-9]*) ;;
+    *) return 1 ;;
+  esac
+  case "${secs}" in
+    *[!0-9]*) return 1 ;;
+  esac
+  case "${frac}" in
+    [0-9][0-9]) ;;
+    *) return 1 ;;
+  esac
+  # A leading zero is octal to `$(( ))`, and 09 is not a number there at all, so
+  # the hundredths lose theirs before they are added.
+  frac="${frac#0}"
+  _COZY_CANARY_CS=$(( secs * 100 + frac ))
+}
+
+# One arm: run a fixed amount of work under a wall-clock ceiling and time it.
+#
+# The ceiling and its kill grace are read from the globals the collector
+# re-validates, the way the shared cAdvisor stream reads the pair its own caller
+# validates. Both also take a pass at source time, so this function finds them
+# set however it is reached; what the collector's pass adds is a value assigned
+# after sourcing, which is how a test sets one.
+#
+# Sets _COZY_CANARY_MS to the elapsed milliseconds and _COZY_CANARY_RC to the
+# status the shell waited on: the work's own whenever the work ended by itself,
+# which is what a healthy run does under a ceiling as much as without one, and
+# timeout's when the ceiling ended it instead. Which of the two a number came
+# from is not readable from the number, which is why the clock decides it below.
+# Returns 1 when the clock could not be read at both ends and 2 when it read but
+# went backwards, which the caller reports as different things -- neither is a
+# duration, but the first is silence about this machine and the second is a
+# broken instrument. Both are different again from work that failed, which is a
+# statement about the machine.
+_cozy_canary_run_arm() {
+  local capture="$1"
+  shift
+  local start=0 end=0
+
+  _COZY_CANARY_CS=0
+  _COZY_CANARY_MS=0
+  _COZY_CANARY_RC=0
+  # Whether a ceiling was in play at all, for the reporter to read beside the
+  # exit status: 124 and 137 are what the ceiling produces, and they are also
+  # what a work command exiting on its own or an outside SIGKILL produces, so
+  # the status alone cannot say the ceiling fired.
+  _COZY_CANARY_BOUNDED=0
+
+  _cozy_canary_stamp || return 1
+  start="${_COZY_CANARY_CS}"
+  # stdin closed for the reason every walk in this file closes it: nothing here
+  # reads it, and a program that started to would consume whatever the caller
+  # was iterating. stdout is discarded because an arm exists for its duration
+  # and its exit status already says whether the work ran to the end; stderr is
+  # kept, since that is where dd reports and where timeout names a command it
+  # could not start. A ceiling that fires says nothing there -- without
+  # --verbose, which this call does not pass, timeout is silent about it -- and
+  # that silence is why the status below is read against the clock rather than
+  # on its own.
+  if command -v timeout >/dev/null 2>&1; then
+    _COZY_CANARY_BOUNDED=1
+    timeout -k "${COZY_DIAG_READ_GRACE}" "${COZY_CANARY_RUN_BOUND}" \
+      "$@" >/dev/null 2>>"${capture}" </dev/null || _COZY_CANARY_RC=$?
+  else
+    "$@" >/dev/null 2>>"${capture}" </dev/null || _COZY_CANARY_RC=$?
+  fi
+  _cozy_canary_stamp || return 1
+  end="${_COZY_CANARY_CS}"
+
+  # A clock that went backwards is refused rather than published as a negative
+  # duration. Every figure this capture prints is derived from it, and a wrong
+  # duration produces a rate that reads exactly like a real one.
+  [ "${end}" -ge "${start}" ] || return 2
+  _COZY_CANARY_MS=$(( (end - start) * 10 ))
+}
+
+# One arm reported into the capture: what it ran, whatever it said on stderr,
+# how long it took, and what that divides to. <quantity> is the work expressed
+# in <unit>s, so the rate is <unit>s per second, and <floor> is the rate in that
+# unit below which the legend calls the machine pathological rather than slow.
+#
+# Returns non-zero when the arm could not be measured at all, so the caller can
+# tell a capture worth reading from one that holds nothing. An arm that finished
+# inside one tick was measured: it carries the note instead of a rate and still
+# returns zero. Sets _COZY_CANARY_ALERT when the figure it did produce is below
+# <floor> or was cut off by the ceiling. The status cannot carry that: an arm
+# that measured a starved machine produced a reading and returns zero like any
+# arm that finished.
+_cozy_canary_report_arm() {
+  local capture="$1" label="$2" quantity="$3" unit="$4" floor="$5"
+  shift 5
+  local timed=0 ms=0 rate=0 bound_rate=0
+
+  printf '\n=== arm: %s ===\n' "${label}" >>"${capture}"
+  printf 'command: %s\n' "$*" >>"${capture}"
+  # The work this arm was asked for, written down before it is divided by
+  # anything. Every other figure here is derived, so a reader who doubts one of
+  # them has the two inputs in front of them rather than in the source of the
+  # release that produced the artifact.
+  printf 'work: %s %s\n' "${quantity}" "${unit}" >>"${capture}"
+  _cozy_canary_run_arm "${capture}" "$@" || timed=$?
+  if [ "${timed}" -eq 2 ]; then
+    printf '%s\n' \
+      'this arm produced no reading: the canary clock read at both ends and the second stamp was the earlier one, so the instrument is wrong rather than the machine slow. Nothing is derived from it here' \
+      >>"${capture}"
+    return 1
+  fi
+  if [ "${timed}" -ne 0 ]; then
+    printf '%s\n' \
+      'this arm produced no reading: the canary clock could not be read at both ends, so how long the work took is not recorded here. That is silence about this machine rather than a finding about it' \
+      >>"${capture}"
+    return 1
+  fi
+  ms="${_COZY_CANARY_MS}"
+  printf 'elapsed: %s ms\n' "${ms}" >>"${capture}"
+
+  # Whether 124 or 137 means the ceiling is decided by the clock rather than by
+  # the status: timeout exits 124 when its term signal ends the work and the
+  # work exits 137 when a kill does, and an outside kill -- the OOM killer
+  # taking the 64 MiB buffer dd allocates is the realistic one -- produces the
+  # same 137 with the ceiling never involved. An arm that ended in either status
+  # before the ceiling could have fired was ended by something else, and
+  # reporting that as the ceiling manufactures the too-slow-to-finish finding
+  # this collector exists to detect. No tolerance is given for the truncation,
+  # because a ceiling that fired cannot read short: both stamps truncate
+  # hundredths off the one clock and the bound is a whole number of seconds, so
+  # the difference of the two floors is at least the bound whatever fraction the
+  # first stamp landed on. A duration under it was produced by something else.
+  local at_ceiling=0 ceiling_note=''
+  case "${_COZY_CANARY_RC}" in
+    124 | 137)
+      if [ "${_COZY_CANARY_BOUNDED}" -eq 1 ] && [ "${ms}" -ge $(( COZY_CANARY_RUN_BOUND * 1000 )) ]; then
+        at_ceiling=1
+      fi
+      ;;
+  esac
+  # Named apart the way the sibling collectors name a kill apart from a
+  # deadline: 137 says a kill ended the arm where 124 says the term signal did,
+  # and that is a different observation even though the status does not say
+  # whose kill it was. Timeout's own follow-up and a kill from outside are the
+  # same 137 here, the way they are before the ceiling above.
+  if [ "${at_ceiling}" -eq 1 ] && [ "${_COZY_CANARY_RC}" -eq 137 ]; then
+    ceiling_note=', on a status that says a kill ended the arm without saying whose'
+  fi
+  # The work's own failure is settled before its duration is, and the order is
+  # the whole of it: a command this machine does not have fails in well under
+  # one tick, so a duration-first reading would report the one arm that never
+  # ran as the one arm too fast to measure.
+  case "${_COZY_CANARY_RC}" in
+    0) ;;
+    124 | 137)
+      if [ "${at_ceiling}" -ne 1 ]; then
+        if [ "${_COZY_CANARY_BOUNDED}" -eq 1 ]; then
+          printf 'this arm produced no reading: the work ended with status %s after %s ms, before the %ss ceiling could have fired, so something other than the canary bound ended it and the duration above is how long it survived rather than how long the work takes here\n' \
+            "${_COZY_CANARY_RC}" "${ms}" "${COZY_CANARY_RUN_BOUND}" >>"${capture}"
+        else
+          printf 'this arm produced no reading: the work ended with status %s with no ceiling in play, so something on this machine ended it and the duration above is how long it survived rather than how long the work takes here\n' \
+            "${_COZY_CANARY_RC}" >>"${capture}"
+        fi
+        return 1
+      fi
+      ;;
+    *)
+      # The exit status goes in the line rather than only in the stderr above
+      # it: a 127 is a binary missing from this machine and a non-zero from the
+      # work itself is something else, and the number is what tells them apart.
+      printf 'this arm produced no reading: it ended %s, so the duration above is how long it took to fail rather than how long the work takes here\n' \
+        "${_COZY_CANARY_RC}" >>"${capture}"
+      return 1
+      ;;
+  esac
+  # And a zero duration before anything divides by it. It is not a fast machine
+  # reported badly, it is a duration this clock cannot express, and dividing by
+  # it ends the shell. Only a finished arm can reach this with a zero: the
+  # ceiling needs the whole bound on the clock, and a kill ahead of the ceiling
+  # was returned above.
+  if [ "${ms}" -eq 0 ]; then
+    printf '%s\n' \
+      'no rate: the arm finished inside one tick of the 10ms clock, so its duration is under the resolution rather than measured. At the sizes this canary runs, that is itself unexpected' \
+      >>"${capture}"
+    return 0
+  fi
+  # Integer division, so a rate under one unit per second lands on zero -- and a
+  # capture saying `rate: 0` reads as a machine that did nothing rather than as
+  # arithmetic that ran out of places.
+  rate=$(( quantity * 1000 / ms ))
+  # The figure the ceiling sentence prints is rounded up where the rate line is
+  # truncated, because the two are different kinds of number: a rate is measured
+  # and rounds toward what was seen, while this is an upper bound on work that
+  # never finished, and truncating a bound downwards prints a strict inequality
+  # the arm itself can sit inside.
+  bound_rate=$(( (quantity * 1000 + ms - 1) / ms ))
+  # The alert every call site turns into a job-log line: the two outside the
+  # diagnostics block and the one inside it. Raised here because this is the one
+  # place the figure and the floor it is read against are both in scope. An arm
+  # the ceiling stopped and an arm that finished under the floor are the same
+  # answer to the question this collector exists to ask -- the machine is not
+  # getting the work done -- and what differs is whether the figure is labelled a
+  # bound or a reading. An arm that finished inside one tick returned above and
+  # raises nothing: too fast to measure is not slow.
+  if [ "${at_ceiling}" -eq 1 ] || [ "${rate}" -lt "${floor}" ]; then
+    _COZY_CANARY_ALERT=1
+  fi
+  if [ "${at_ceiling}" -eq 1 ]; then
+    # The ceiling firing is the strongest reading this arm can produce, so it
+    # is recorded as a bound rather than dropped: the work did not finish in
+    # that many seconds, which is already a multiple of what it should take.
+    # Not recorded as a rate, because a rate would average over work that did
+    # not all happen. One sentence rather than two: rounding up makes the bound
+    # at least one in the printed unit for any quantity of at least one, and the
+    # sizes declared above are never zero, so there is no zero case left for a
+    # second sentence to carry.
+    printf 'this arm did not finish: it was stopped at the %ss ceiling%s, so its rate is BELOW %s %s per second and that figure is a bound rather than a reading\n' \
+      "${COZY_CANARY_RUN_BOUND}" "${ceiling_note}" "${bound_rate}" "${unit}" >>"${capture}"
+  else
+    if [ "${rate}" -eq 0 ]; then
+      printf 'rate: under one %s per second, which the work and elapsed lines above give exactly\n' \
+        "${unit}" >>"${capture}"
+    else
+      printf 'rate: %s %s per second\n' "${rate}" "${unit}" >>"${capture}"
+    fi
+  fi
+}
+
+# The runner layer fixed-work canary.
+#
+# The counters this report already carries are read in whatever unit their
+# source publishes -- time in the /proc/stat rows and the per-thread ticks,
+# events in the KVM exits, throttled periods beside throttled seconds in the
+# cgroup rows, and instantaneous values and running maxima in the files sitting
+# beside those exits -- and none of them is a fixed quantity of work.
+# So a machine that spent every tick and got a fraction of the work done reads
+# as healthy in all of them. That is the shape the node-join failures on this
+# lane have: the counters at every layer look normal while the work does not
+# get done. This collector carries its own unit of work instead, which gives its
+# reading a scale of its own and makes the pathology visible in a single red run
+# with no green one beside it.
+#
+# Two arms, because the candidates the time counters cannot separate act on
+# different resources: interference on the shared cache and the memory
+# controller from whatever else the host is running, and a core doing less per
+# cycle. The two arms differ in how much of each they feel rather than in being
+# deaf to one: the compute arm's working set is small enough that pressure on
+# the shared cache and the memory controller moves it little, while the memory
+# arm is dominated by it. A large asymmetric shift between them therefore points
+# at one of the two, to the factor of ten these figures resolve and no finer.
+#
+# What this is NOT is a measurement of the tenant workers. It runs at the runner
+# layer, where the sandbox nodes are hosted. Two layers down, the same
+# fixed-work question is already answered by how long the tenant workers take to
+# unpack their initramfs, which the serial console capture records. One layer
+# down no capture times it: the QEMU line that boots the sandbox nodes passes no
+# serial backend (hack/e2e-prepare-cluster.bats), so nothing carries their
+# console anywhere for a capture to read. What those nodes do put in this report
+# is their kernel ring buffer, which hack/cozyreport.sh pulls over the Talos API
+# into sandbox-host/talos-<node>-dmesg.txt -- read there for what their kernels
+# said, and a canary here would still be measuring the layer above them.
+cozy_capture_runner_canary() {
+  local sample="$1"
+  local report_dir="${COZY_REPORT_DIR:-/workspace/_out/cozyreport}/snapshots/${COZY_SNAPSHOT_NAME:-kubernetes}/runner-canary/sample-${sample}"
+  local capture="${report_dir}/fixed-work.txt"
+  local readings=0 mem_mib=0 cpu_program='' read_at='' read_done=''
+
+  # Cleared before anything below can return, so a call site reads it after
+  # every exit from here rather than only after the ones that reached an arm.
+  _COZY_CANARY_ALERT=0
+  # Checked, unlike most of what follows: with no directory every write below
+  # fails, the collector becomes a silent no-op, and the artifact carries the
+  # empty space this capture exists to refuse -- with nowhere to put a marker
+  # saying so.
+  if ! mkdir -p "${report_dir}"; then
+    echo "the report directory for the runner canary could not be created, so nothing was measured and nothing could be written to say so" >&2
+    return 1
+  fi
+  # Truncated once here and appended to from then on, the way every raw file
+  # beside this one is written: the arms and the legend are written in pieces,
+  # and a file left over from an earlier call would otherwise carry two runs of
+  # one sample with nothing between them to say where the first ended. Opened
+  # with `true` rather than `:` and checked: `:` is a POSIX special built-in,
+  # so a redirection that fails on it exits a non-interactive shell -- dash,
+  # which is /bin/sh in the sandbox image, honours that -- and on the failure
+  # path that exit ends the whole diagnostics block, straight past the call
+  # site's `|| true`. The tenant snapshot survives it -- it is an EXIT trap,
+  # armed before this block runs -- so what the exit costs is the rest of the
+  # diagnostics, not the snapshot behind them. A capture that cannot be opened
+  # is the mkdir case again: nothing can be measured, and the report has nowhere
+  # to say so.
+  if ! true >"${capture}"; then
+    echo "the capture file for the runner canary could not be opened for writing, so nothing was measured and nothing could be written to say so" >&2
+    return 1
+  fi
+  # Re-validated here for the reason every collector re-validates: a value
+  # assigned after this file is sourced never passed the assignment-time check,
+  # and zero reaches `timeout` as no bound at all.
+  COZY_CANARY_RUN_BOUND=$(_cozy_diag_seconds "${COZY_CANARY_RUN_BOUND-}" "$COZY_CANARY_RUN_BOUND_DEFAULT" COZY_CANARY_RUN_BOUND positive "zero is no ceiling at all, and an arm that never returns costs the phase whatever is gated behind it")
+  COZY_DIAG_READ_GRACE=$(_cozy_diag_seconds "${COZY_DIAG_READ_GRACE-}" "$COZY_DIAG_READ_GRACE_DEFAULT" COZY_DIAG_READ_GRACE)
+
+  mem_mib=$(( COZY_CANARY_MEM_BLOCK_MIB * COZY_CANARY_MEM_BLOCKS ))
+  # `print s` is kept and its output discarded: the sum is not wanted, but an
+  # awk able to see that the loop has no effect would be free to skip it, and a
+  # canary optimised away reports a healthy machine at any speed.
+  cpu_program="BEGIN { s = 0; for (i = 0; i < ${COZY_CANARY_CPU_ITERATIONS}; i++) s = (s + i) % 1000003; print s }"
+
+  echo "--- running the runner fixed-work canary (sample ${sample}) ---"
+  # Stamped around the pair for the reason the readings beside this one are
+  # stamped: the capture carries no sample time of its own, and the two samples
+  # are separated by the node-join wait rather than by a knob.
+  read_at=$(date -u +%s)
+  if _cozy_canary_report_arm "${capture}" \
+    "compute, a loop over a handful of integer-valued scalars" \
+    "${COZY_CANARY_CPU_ITERATIONS}" iterations "${COZY_CANARY_CPU_MIN_RATE}" \
+    awk "${cpu_program}"; then
+    readings=$(( readings + 1 ))
+  fi
+  if _cozy_canary_report_arm "${capture}" \
+    "memory, a store stream over blocks sized against one core's cache" \
+    "${mem_mib}" MiB "${COZY_CANARY_MEM_MIN_RATE}" \
+    dd if=/dev/zero of=/dev/null "bs=$(( COZY_CANARY_MEM_BLOCK_MIB * 1048576 ))" "count=${COZY_CANARY_MEM_BLOCKS}"; then
+    readings=$(( readings + 1 ))
+  fi
+  read_done=$(date -u +%s)
+
+  if ! command -v timeout >/dev/null 2>&1; then
+    # Said in the capture and not only in the phase log, for the reason the
+    # readings beside this one say it there: the warning naming the unbounded
+    # collectors fires inside the diagnostics phase, and one of this pair of
+    # samples is taken outside that phase on every run.
+    printf '\n%s\n' '[bounds] timeout is not on PATH here, so the arms above ran with no ceiling; each of them terminates on its own, so what was lost is the ceiling rather than the reading -- but on the slow machine this canary exists to catch, fixed work with no ceiling can take minutes rather than seconds, and everything that prices this collector at two bounded arms no longer holds]' \
+      >>"${capture}"
+  fi
+
+  printf '\n' >>"${capture}"
+  printf '%s\n' \
+    '[this canary runs on the RUNNER VM, inside the sandbox container: one layer above the three Talos nodes and two above the tenant workers. It is the only reading in this report that carries its own unit of work at this layer; two layers down the serial console capture records the tenant workers unpacking their initramfs, and one layer down no capture times it, because the QEMU line that boots the sandbox nodes passes no serial backend for a capture to read; what those nodes put here instead is their kernel ring buffer, under sandbox-host/talos-<node>-dmesg.txt. The counters beside it are read in the units their sources publish -- time in the CPU rows, events in the KVM exits, instantaneous values and running maxima in the files beside those -- and a counter with no unit of work in it cannot see a machine that spent its ticks and got less done with them, which is the shape this lane keeps failing in]' \
+    >>"${capture}"
+  printf '[two arms, and what makes them answer the same interference differently is the working set, not the amount of work each does. The compute arm loops over a handful of scalars, which live in registers and the nearest cache, so pressure on the shared cache or the memory controller moves it little rather than not at all. The memory arm streams blocks: a read of /dev/zero zeroes the buffer the caller supplied and a write to /dev/null never looks at it, so each block is one pass of stores over the whole block. The block size is both the working set and the reuse distance -- %s MiB here, against the 32 MiB of last-level cache an EPYC core can allocate into on the parts this lane has run on -- and a block that exceeds that cache leaves no byte still cached by the time it is written again, so the traffic lands on the memory controller. Which part this run got is recorded in sandbox-host/runner-identity.txt at the root of this report, and that is what tells a reader of this artifact which case it is looking at: on a part whose per-core cache exceeds the block size this arm stops being memory-bound and reads high. On a machine in front of you the dd line above can be rerun with a block size that fits the cache, and the figure rises several times over]\n' \
+    "${COZY_CANARY_MEM_BLOCK_MIB}" >>"${capture}"
+  printf '[expected ranges, and what they are worth. These are what the construction can do on a healthy server core, not figures measured on this lane, and they are stated to the precision they have: a factor of ten is what they resolve and a factor of two is not. Memory arm: one core sustains single-digit to low-double-digit GB per second of streaming stores, because the ceiling is how many misses one core keeps outstanding rather than how many memory channels the socket has, so the %s MiB it writes land in about a second on a fast core and in about eight at the bottom of that band, while anything under %s in the MiB-per-second unit the rate lines above are printed in, about half a gigabyte a second, is pathological rather than merely slow. Compute arm: the rate depends on the awk implementation as much as on the core, and that implementation is a property of the sandbox image rather than of the run, pinned by digest in packages/core/testing/images/e2e-sandbox/Dockerfile, so on the mawk that image ships a simple loop over integer-valued scalars runs at tens of millions of iterations a second and the %s of them here land in about a second, so anything under %s iterations a second, one factor of ten below that, is pathological rather than merely slow]\n' \
+    "${mem_mib}" "${COZY_CANARY_MEM_MIN_RATE}" "${COZY_CANARY_CPU_ITERATIONS}" "${COZY_CANARY_CPU_MIN_RATE}" >>"${capture}"
+  printf '%s\n' \
+    '[what this canary does NOT separate. It reads wall clock only, so an arm that took ten times as long could be a core doing less per cycle or a container that was not on a core at all. Where to look for the second is runner-kernel-cpu-time beside this capture and sandbox-host-cpu-time one layer down, and their steal columns do not read the same way. On the runner row a climb is proof this VM was preempted and a zero proves nothing, because nobody here launches that VM and the column is filled only where the hypervisor exposes the clock. One layer down the sandbox nodes are started with accel=kvm, which hands the guest that accounting, so a zero there means the node got every turn it asked for. Which is what makes the pair worth reading together: a sandbox zero under a climbing runner row puts the wait a layer above them. Read those first when an arm here is slow, and read each for what it covers: the runner-kernel rows are a pair bracketing the node-join wait, so they describe the whole join window next to these seconds rather than these seconds themselves, while the sandbox-host rows are a pair seconds apart inside the on-failure diagnostics block, taken minutes after the wait already failed and absent from a green run altogether]' \
+    '[the two samples. Sample 1 is taken before the node-join wait and sample 2 after it, on the failing and the passing path alike, on the same binaries in the same container. A difference between them puts the change inside the interval the pair brackets, which is the wait together with the readings taken on either side of it; two equally slow samples say it was already there going into that interval, which is the case the expected ranges above are the only instrument for -- the pair speaks for the interval between its own readings and for nothing before them]' \
+    '[this collector perturbs what it measures, which is why it is placed where it is. It occupies one core for the duration of each arm, twice per run. Sample 1 runs before the first reading of all three pairs that bracket the node-join wait, and sample 2 after the last of their second readings, so neither burn falls inside any interval those pairs divide by]' \
+    '[durations here are read from /proc/uptime, which the kernel prints in hundredths of a second, so every figure is quantised to 10ms. Against arms sized to take about a second that is about a percent, and it is why an arm finishing inside one tick is reported as being under the resolution rather than as a rate]' \
+    >>"${capture}"
+  printf '[read attempted from %s to %s epoch seconds]\n' \
+    "${read_at}" "${read_done}" >>"${capture}"
+
+  # Non-zero when no arm reported at all, and only then. An arm that finished
+  # inside one tick counts as having reported, so a capture holding that note
+  # instead of a rate still returns zero. Both call sites outside the
+  # diagnostics block consume this status to put a shortfall in the job log, and
+  # both of them run on the passing path, where the report is the artifact
+  # nobody downloads.
+  if [ "${readings}" -eq 0 ]; then
+    return 1
+  fi
+}
+
 # The shell run inside a worker's compute container to list QEMU's threads.
 #
 # A function rather than a literal at the call site so it can be run against a
@@ -3363,6 +3811,13 @@ COZY_DIAG_MAX_IMPORTERS=$(_cozy_diag_seconds "${COZY_DIAG_MAX_IMPORTERS:-$COZY_D
 # not a disabled bound but two readings taken at the same instant, which divide
 # to nothing and leave a pair that looks collected and answers no question.
 COZY_DIAG_RATE_INTERVAL=$(_cozy_diag_seconds "${COZY_DIAG_RATE_INTERVAL:-$COZY_DIAG_RATE_INTERVAL_DEFAULT}" "$COZY_DIAG_RATE_INTERVAL_DEFAULT" COZY_DIAG_RATE_INTERVAL positive "zero puts both readings at the same instant, so the pair divides to nothing")
+# The canary ceiling takes the same source-time pass as its neighbours, and not
+# only for symmetry: the collector re-validates with `${COZY_CANARY_RUN_BOUND-}`,
+# so without this line a run that never set the knob hands the validator an
+# empty string, and the job log opens with a warning about ignoring a value
+# nobody supplied. Rejected as `positive` because zero reaches `timeout` as no
+# bound at all.
+COZY_CANARY_RUN_BOUND=$(_cozy_diag_seconds "${COZY_CANARY_RUN_BOUND:-$COZY_CANARY_RUN_BOUND_DEFAULT}" "$COZY_CANARY_RUN_BOUND_DEFAULT" COZY_CANARY_RUN_BOUND positive "zero is no ceiling at all, and an arm that never returns costs the phase whatever is gated behind it")
 
 # Wall-clock budget for the on-failure diagnostics phase as a whole, on top of the
 # per-read bounds above, because the two buy different things. A per-read bound
@@ -3447,7 +3902,7 @@ cozy_diag_phase_start() {
   # an unchecked list sitting beside a checked one, drifting from it at whatever
   # rate collectors are added.
   command -v timeout >/dev/null 2>&1 || \
-    echo "» WARNING: timeout is not on PATH; the bounded reads below run UNBOUNDED, so one that hangs can still take the op and the tenant snapshot with it, and the collectors that call timeout directly (wedge check, serial console, guest Talos) exit 127 and collect nothing; the ones that guard the call with command -v -- the worker CPU throttling, worker network counter, worker block IO counter, sandbox node CPU time, sandbox kernel KVM counters, runner kernel CPU time, sandbox QEMU per-thread CPU time, worker per-thread CPU time, ghcr-mirror and talos-image-cache captures -- keep collecting instead, unbounded" >&2
+    echo "» WARNING: timeout is not on PATH; the bounded reads below run UNBOUNDED, so one that hangs can still take the op and the tenant snapshot with it, and the collectors that call timeout directly (wedge check, serial console, guest Talos) exit 127 and collect nothing; the ones that guard the call with command -v -- the worker CPU throttling, worker network counter, worker block IO counter, sandbox node CPU time, sandbox kernel KVM counters, runner kernel CPU time, sandbox QEMU per-thread CPU time, runner fixed-work canary, worker per-thread CPU time, ghcr-mirror and talos-image-cache captures -- keep collecting instead, unbounded" >&2
   # Re-checked here, not only at assignment: a value set after this file is sourced
   # -- which is how a test sets it -- would otherwise reach the arithmetic below
   # unvalidated, and that is the one failure that costs the whole block.
@@ -3649,6 +4104,31 @@ cozy_report_node_join_failure() {
   # the sum against the phase budget.
   cozy_capture_runner_kernel_cpu_time 2 || true
   cozy_capture_sandbox_qemu_thread_cpu 2 || true
+  # The canary's second sample, last of the four that bracket the wait. Last
+  # rather than beside them because it is the only one of the four that costs a
+  # core rather than a read -- ahead of them, its burn would sit inside the
+  # interval each of those pairs divides by.
+  #
+  # Here rather than further down the block, and ungated, for a reason of its
+  # own: unlike the three beside it this sample is an absolute reading
+  # and would still be a reading taken minutes later. What it would stop being
+  # is comparable. The passing path takes its own sample within seconds of the
+  # wait returning, and the whole use of the expected ranges is that a red
+  # figure and a green figure describe the same moment in the run; a red sample
+  # that drifted behind the diagnostics reads a machine several minutes past the
+  # failure it is meant to characterise.
+  #
+  # What it costs, stated rather than waved at: two arms, each under a ceiling
+  # of its own. The guard in hack/run-kubernetes-node-join_test.bats prices both
+  # at that ceiling and holds the sum against the phase budget.
+  cozy_capture_runner_canary 2 || true
+  # The alert reaches the job log here as well, and for a sharper version of the
+  # reason the two samples outside this block report theirs: this is the run a
+  # triager opens, the tail of it is where they start, and sample 1's warning is
+  # eighteen minutes and thousands of lines above.
+  if [ "${_COZY_CANARY_ALERT:-0}" -eq 1 ]; then
+    echo "» WARNING: the runner fixed-work canary did not read inside the range its own legend calls healthy on the failing run, so what follows was collected on a machine that was not getting the work done; which arm it was and what figure it gave is written into the capture" >&2
+  fi
   cozy_diag_read 'tenant node table' \
     kubectl --kubeconfig "${tenant_kc}" describe nodes "${request_timeout}"
   cozy_diag_read 'tenant HelmReleases' \
@@ -4265,6 +4745,27 @@ EOF
   # Verify the Kubernetes version matches what we expect (retry for up to 20 seconds)
   timeout 20 sh -ec 'until kubectl --kubeconfig tenantkubeconfig-'"${test_name}"' version 2>/dev/null | grep -Fq "Server Version: ${k8s_version}"; do sleep 1; done'
 
+  # The canary goes first, outside the three counter pairs below rather than
+  # among them, and it is a different kind of instrument from all three: it does
+  # not read a running total twice, it runs a fixed amount of work and times it,
+  # so each sample stands on its own and there is no interval for anything to
+  # widen. What it does have is a cost, since it occupies a core for a couple of
+  # seconds. That is why it sits out here. Taken between any of those first
+  # readings and the wait, its burn would land inside the interval that pair
+  # divides by: runner-kernel CPU time the pair would then charge to the join
+  # window, and for the two counting the guests, a core taken away from what
+  # they count; ahead of all three, it lands on neither side of any of them, and
+  # the second sample sits behind all three second readings for the same reason.
+  #
+  # Both outcomes reach the job log rather than only the capture, and the second
+  # for the same reason as the first: a run that took a reading the legend calls
+  # pathological is the loudest thing this collector can say, and on the passing
+  # path the report holding it is the artifact nobody downloads.
+  if ! cozy_capture_runner_canary 1; then
+    echo "» WARNING: the runner fixed-work canary produced no reading before the node-join wait, so this run has no measure of what one core got done at this layer going into it; if a capture was written it says whether the clock could not be read or the work itself failed, and if it could not be written the line above this one says so" >&2
+  elif [ "${_COZY_CANARY_ALERT:-0}" -eq 1 ]; then
+    echo "» WARNING: the runner fixed-work canary did not read inside the range its own legend calls healthy before the node-join wait, so this run went into the wait on a machine that was already not getting the work done; which arm it was and what figure it gave is written into the capture" >&2
+  fi
   # The first readings of the three pairs that bracket the wait, taken here
   # rather than inside the failure block and taken on every run rather than on
   # the failing ones. All three read running totals, so one reading is an
@@ -4331,6 +4832,22 @@ EOF
   fi
   if ! cozy_capture_sandbox_qemu_thread_cpu 2; then
     echo "» WARNING: the sandbox VMs' QEMU threads yielded no reading after the node-join wait, so this report carries no green baseline for how that time split across the three nodes; whether the walk failed or this container had no QEMU process to read is written into the capture itself" >&2
+  fi
+  # The canary's second sample, last on this path as it was first before the
+  # wait. Behind all three second readings deliberately: it burns a core, and
+  # taken ahead of any of them that burn would sit inside the interval the pair
+  # divides by. It is also the half of the pair with the green figure in it --
+  # the expected ranges the capture states are what a red run is read against
+  # when there is no green run to compare it with, and a green run that records
+  # its own numbers is what says whether those ranges describe this lane.
+  #
+  # Ungated, unlike the console capture further down this path, and the reason is
+  # not that the rule there does not apply. That rule is for a collector costing
+  # minutes; both arms here sit under one ceiling apiece and the pair is seconds.
+  if ! cozy_capture_runner_canary 2; then
+    echo "» WARNING: the runner fixed-work canary produced no reading after the node-join wait, so this report carries no green figure for what one core gets done at this layer; if a capture was written it says whether the clock could not be read or the work itself failed, and if it could not be written the line above this one says so" >&2
+  elif [ "${_COZY_CANARY_ALERT:-0}" -eq 1 ]; then
+    echo "» WARNING: the runner fixed-work canary did not read inside the range its own legend calls healthy after the node-join wait, so this run passed on a machine that was not getting the work done at this layer; which arm it was and what figure it gave is written into the capture" >&2
   fi
   kubectl --kubeconfig "tenantkubeconfig-${test_name}" get nodes -o wide
 
