@@ -37,12 +37,17 @@
 # artifact lands, but operators should avoid editing Kubernetes CRs during a
 # platform upgrade (also called out in the release notes).
 #
-# _cluster and nodeHealthCheck are NOT copied into the child values: _cluster is
-# injected at runtime from the cozystack-values Secret (referenced via the
-# child's valuesFrom, same as every tenant app), and nodeHealthCheck collapses
-# into the child's per-pool maxUnhealthy / nodeStartupTimeout below. storageClass
-# falls back to the cluster-level value to mirror the parent's
-# `group.storageClass | default .Values.storageClass`.
+# _cluster and nodeHealthCheck are NOT copied verbatim into the child values:
+# _cluster is injected at runtime from the cozystack-values Secret (referenced
+# via the child's valuesFrom, same as every tenant app), and nodeHealthCheck
+# collapses into the child's per-pool maxUnhealthy / nodeStartupTimeout /
+# readyUnknownTimeout / readyFalseTimeout below. The cluster-level
+# maxNodeProvisionTime and the per-group podCpuLimit / podCpuRequest are carried
+# through too: all of these feed the pool's MachineDeployment / MachineHealthCheck
+# or the KubevirtMachineTemplate, so dropping them would silently reset a tuned
+# pool (podCpuLimit/podCpuRequest additionally roll the pool, being KMT-hash
+# inputs). storageClass falls back to the cluster-level value to mirror the
+# parent's `group.storageClass | default .Values.storageClass`.
 #
 # The parent HelmRelease's spec.values keeps its now-unused nodeGroups /
 # nodeHealthCheck keys: the new kubernetes chart schema ignores them (no
@@ -381,7 +386,7 @@ kubectl get helmrelease --all-namespaces \
       # excluded: they are legitimately object/array.
       bad_scalar=$(printf '%s' "$grp" | jq -r '
         . as $g
-        | ["minReplicas","maxReplicas","instanceType","diskSize","storageClass","logSerialConsole","maxUnhealthy","nodeStartupTimeout"]
+        | ["minReplicas","maxReplicas","instanceType","diskSize","storageClass","logSerialConsole","maxUnhealthy","nodeStartupTimeout","podCpuLimit","podCpuRequest"]
         | map(. as $k | select(($g|has($k)) and (($g[$k]|type) as $t | $t == "object" or $t == "array")))
         | join(",")')
       if [ -n "$bad_scalar" ]; then
@@ -396,7 +401,7 @@ kubectl get helmrelease --all-namespaces \
         --argjson grp "$grp" '
         def pick($o; ks): reduce ks[] as $k ({}; if ($o | has($k)) then . + {($k): $o[$k]} else . end);
         ({cluster: $cluster}
-         + pick($grp; ["minReplicas","maxReplicas","instanceType","diskSize","roles","resources","gpus","kubelet","logSerialConsole"])
+         + pick($grp; ["minReplicas","maxReplicas","instanceType","diskSize","roles","resources","gpus","kubelet","logSerialConsole","podCpuLimit","podCpuRequest"])
          # storageClass: per-group value if set and non-empty, else cluster-level
          # (mirrors the parent `group.storageClass | default .Values.storageClass`).
          + (if (($grp | has("storageClass")) and ($grp.storageClass != "")) then {storageClass: $grp.storageClass}
@@ -409,6 +414,13 @@ kubectl get helmrelease --all-namespaces \
          + (if ($grp | has("nodeStartupTimeout")) then {nodeStartupTimeout: $grp.nodeStartupTimeout}
             elif ((.nodeHealthCheck | type) == "object" and (.nodeHealthCheck | has("nodeStartupTimeout"))) then {nodeStartupTimeout: .nodeHealthCheck.nodeStartupTimeout}
             else {} end)
+         # cluster-wide MHC condition timeouts: no per-group override exists in the
+         # parent model, so these flatten straight from nodeHealthCheck.
+         + (if ((.nodeHealthCheck | type) == "object" and (.nodeHealthCheck | has("readyUnknownTimeout"))) then {readyUnknownTimeout: .nodeHealthCheck.readyUnknownTimeout} else {} end)
+         + (if ((.nodeHealthCheck | type) == "object" and (.nodeHealthCheck | has("readyFalseTimeout"))) then {readyFalseTimeout: .nodeHealthCheck.readyFalseTimeout} else {} end)
+         # cluster-wide autoscaler budget: top-level parent field, rendered onto the
+         # pool MachineDeployment maxnodeprovisiontime annotation.
+         + (if (has("maxNodeProvisionTime") and (.maxNodeProvisionTime != null)) then {maxNodeProvisionTime: .maxNodeProvisionTime} else {} end)
          # cluster-level inputs the pool templates consume verbatim
          + pick(.; ["version","talos"])
          # images: copy only the declared kubectl override, not the whole

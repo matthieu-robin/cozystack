@@ -143,3 +143,41 @@ JSON
   [ "$(jq -r '.spec.values.storageClass // "ABSENT"' "$FAKE_CHILD_HR")" = "ABSENT" ]
   rm -rf "$WORK"
 }
+
+@test "adoption carries podCpuLimit/podCpuRequest and the cluster-wide MHC timeouts so a tuned pool is neither rolled nor reset" {
+  prep
+  # A pre-split parent that tuned worker sizing and MachineHealthCheck timeouts.
+  # podCpuLimit/podCpuRequest feed the content-hashed KubevirtMachineTemplate, so
+  # dropping them on adoption renames the KMT and rolls every worker VM of the
+  # pool. readyUnknownTimeout / readyFalseTimeout / maxNodeProvisionTime feed the
+  # pool's MachineHealthCheck and the autoscaler annotation, so dropping them
+  # silently resets the tuning to the chart default. All must survive the
+  # parent -> child value mapping (these fields arrived with the main merge that
+  # made the pool chart configurable; the pick list has to keep pace with it).
+  cat > "$FAKE_HR_LIST" <<'JSON'
+{"items":[{"metadata":{"namespace":"tenant-test","name":"kubernetes-test3"},"spec":{"values":{
+  "nodeGroups":{"md0":{"minReplicas":1,"maxReplicas":3,"resources":{"cpu":"4","memory":"8Gi"},"podCpuLimit":"3","podCpuRequest":"2"}},
+  "nodeHealthCheck":{"maxUnhealthy":"30%","nodeStartupTimeout":"25m","readyUnknownTimeout":"90s","readyFalseTimeout":"7m"},
+  "maxNodeProvisionTime":"45m",
+  "talos":{"version":"v1.13.0","schematicID":"deadbeef","imageFactoryURL":"https://factory.talos.dev","installerRepository":"factory.talos.dev/installer"},
+  "version":"v1.32"}}}]}
+JSON
+  rc=0
+  bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
+  cat "$WORK/out"
+  [ "$rc" -eq 0 ]
+  grep -qF -- "APPLY-HR" "$FAKE_CMDLOG"
+  [ "$(jq -r '.metadata.name' "$FAKE_CHILD_HR")" = "kubernetes-nodes-test3-md0" ]
+
+  # KMT-hash inputs: carried verbatim from the group, or the pool rolls on adoption.
+  [ "$(jq -r '.spec.values.podCpuLimit' "$FAKE_CHILD_HR")" = "3" ]
+  [ "$(jq -r '.spec.values.podCpuRequest' "$FAKE_CHILD_HR")" = "2" ]
+
+  # cluster-wide MHC / autoscaler tuning: flattened onto the pool, not reset.
+  [ "$(jq -r '.spec.values.maxUnhealthy' "$FAKE_CHILD_HR")" = "30%" ]
+  [ "$(jq -r '.spec.values.nodeStartupTimeout' "$FAKE_CHILD_HR")" = "25m" ]
+  [ "$(jq -r '.spec.values.readyUnknownTimeout' "$FAKE_CHILD_HR")" = "90s" ]
+  [ "$(jq -r '.spec.values.readyFalseTimeout' "$FAKE_CHILD_HR")" = "7m" ]
+  [ "$(jq -r '.spec.values.maxNodeProvisionTime' "$FAKE_CHILD_HR")" = "45m" ]
+  rm -rf "$WORK"
+}

@@ -494,6 +494,7 @@ metadata:
   annotations:
     cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size: "{{ $group.minReplicas }}"
     cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size: "{{ $group.maxReplicas }}"
+    cluster.x-k8s.io/autoscaling-options-maxnodeprovisiontime: {{ include "kubernetes.positiveDuration" (dict "field" "maxNodeProvisionTime" "value" $.Values.maxNodeProvisionTime) | quote }}
     {{- if $effectiveMemory }}
     {{-   $sysBytes := include "cozy-lib.resources.toFloat" $systemReservedMemory | float64 }}
     {{-   $kubeBytes := include "cozy-lib.resources.toFloat" $kubeReservedMemory | float64 }}
@@ -600,10 +601,10 @@ spec:
   unhealthyConditions:
   - type: Ready
     status: Unknown
-    timeout: 30s
+    timeout: {{ include "kubernetes.positiveDuration" (dict "field" "readyUnknownTimeout" "value" $.Values.readyUnknownTimeout) | quote }}
   - type: Ready
     status: "False"
-    timeout: 300s
+    timeout: {{ include "kubernetes.positiveDuration" (dict "field" "readyFalseTimeout" "value" $.Values.readyFalseTimeout) | quote }}
 ---
 apiVersion: cozystack.io/v1alpha1
 kind: WorkloadMonitor

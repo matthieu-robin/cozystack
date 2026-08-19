@@ -33,6 +33,7 @@ spec:
         # than the reads that discriminate between failure modes:
         #   node-join diagnostics reads
         #   worker network counters
+        #   worker block IO counters
         #   serial-console family (~6m25s at worst, ~4m05s at the pool's minimum)
         #   worker CPU usage and throttling counters, two samples
         #   sandbox node CPU time, two samples
@@ -42,6 +43,11 @@ spec:
         #   guest Talos capture
         #   ghcr-mirror state, access log and warm-up Job
         #   talos-image-cache diagnosis
+        # The three bracket pairs -- the sandbox kernel KVM counters, the runner
+        # kernel CPU time and the sandbox QEMU thread time -- sit outside this
+        # order on purpose: each is ungated, one bounded read a side, taken
+        # before the node-join wait and right after it on both paths, and their
+        # cost arms live in the budget guard rather than in this list.
         # and then, after the phase rather than inside it, the in-process tenant
         # crust-gather snapshot.
         #
