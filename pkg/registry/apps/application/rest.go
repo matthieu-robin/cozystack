@@ -41,6 +41,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
+	"k8s.io/apiserver/pkg/warning"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -202,6 +203,7 @@ func (r *REST) Create(ctx context.Context, obj runtime.Object, createValidation 
 	}
 
 	r.warnLegacyPresets(app)
+	r.warnRemovedKubernetesFields(ctx, app)
 
 	// Run the genericapiserver-supplied validating admission chain
 	// (validating webhooks + ValidatingAdmissionPolicies) before
@@ -549,6 +551,7 @@ func (r *REST) Update(ctx context.Context, name string, objInfo rest.UpdatedObje
 	}
 
 	r.warnLegacyPresets(app)
+	r.warnRemovedKubernetesFields(ctx, app)
 
 	// Convert Application to HelmRelease
 	helmRelease, err := r.ConvertApplicationToHelmRelease(app)
@@ -1918,6 +1921,34 @@ func (r *REST) warnLegacyPresets(app *appsv1alpha1.Application) {
 	}
 	for _, msg := range deprecationMessagesFor(r.kindName, app.Namespace, app.Name, app.Spec.Raw) {
 		klog.Warning(msg)
+	}
+}
+
+// removedKubernetesFields are Kubernetes CR value keys that Phase 2 moved to the
+// separate KubernetesNodes resource. They are still accepted and stored -- an
+// upgraded cluster keeps them in its values until re-edited, and the adoption
+// migration deliberately leaves them in place rather than rewriting parent
+// values mid-upgrade -- but they no longer render anything on the Kubernetes CR.
+var removedKubernetesFields = []string{"nodeGroups", "nodeHealthCheck", "maxNodeProvisionTime"}
+
+// warnRemovedKubernetesFields emits a client-facing admission warning for each
+// Phase 2-removed field still present in a Kubernetes CR's values, so an
+// operator editing one (e.g. bumping spec.nodeGroups.<x>.minReplicas) is told it
+// has no effect instead of silently getting nothing. Non-blocking: the field is
+// preserved as-is; worker pools are managed as KubernetesNodes resources.
+func (r *REST) warnRemovedKubernetesFields(ctx context.Context, app *appsv1alpha1.Application) {
+	if r.kindName != kubernetesKind || app == nil || app.Spec == nil || len(app.Spec.Raw) == 0 {
+		return
+	}
+	var values map[string]any
+	if err := json.Unmarshal(app.Spec.Raw, &values); err != nil {
+		return
+	}
+	for _, key := range removedKubernetesFields {
+		if _, present := values[key]; present {
+			warning.AddWarning(ctx, "", fmt.Sprintf(
+				"spec.%s is ignored on the Kubernetes resource since Phase 2: worker pools are managed as separate KubernetesNodes resources (see the kubernetes-nodes chart). The field is stored but has no effect.", key))
+		}
 	}
 }
 
