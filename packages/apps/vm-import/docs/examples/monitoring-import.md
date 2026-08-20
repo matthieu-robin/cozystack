@@ -58,25 +58,6 @@ kubectl get vm -n production -l cozystack.io/adopted=true
 
 ## Detailed Progress Tracking
 
-### Check warm migration progress (if enabled)
-
-Warm migrations show incremental data transfer progress:
-
-```bash
-kubectl get migration production-migration -n production -o jsonpath='{.status.vms[*].transferred}'
-```
-
-Example output:
-
-```json
-{
-  "nginx-frontend-01": "45GB/50GB (90%)",
-  "nginx-frontend-02": "48GB/50GB (96%)",
-  "postgres-primary": "180GB/200GB (90%)",
-  "postgres-replica": "195GB/200GB (97.5%)"
-}
-```
-
 ### Monitor disk transfers
 
 ```bash
@@ -212,14 +193,8 @@ kubectl get vm -n production -l cozystack.io/adopted=true -o custom-columns=NAME
 
 ## Timeline Expectations
 
-### Cold Migration
 - Small VM (20GB): 5-15 minutes
 - Medium VM (100GB): 20-45 minutes
 - Large VM (500GB): 1-3 hours
-
-### Warm Migration
-- Initial sync (based on disk size)
-- Incremental syncs: 5-10 minutes per iteration
-- Final cutover: 2-5 minutes (minimal downtime)
 
 **Note**: Times vary based on network bandwidth, storage speed, and vCenter load.

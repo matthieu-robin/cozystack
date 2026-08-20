@@ -19,7 +19,7 @@ stringData:
   thumbprint: "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD"
 
 ---
-apiVersion: apps.cozystack.io/v1
+apiVersion: apps.cozystack.io/v1alpha1
 kind: VMImport
 metadata:
   name: my-first-import
@@ -35,9 +35,6 @@ spec:
       name: "web-server"  # Target name in KubeVirt
     - id: "vm-43"
       name: "db-server"
-
-  # Migration type
-  warm: false  # Cold migration (VM must be powered off)
 
   # Network mapping
   networkMap:

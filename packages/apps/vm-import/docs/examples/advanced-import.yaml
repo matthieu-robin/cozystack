@@ -1,7 +1,6 @@
 # Example: Advanced VMware VM Import
 #
 # This example demonstrates:
-# - Warm migration (incremental replication)
 # - Multus network attachment
 # - Multiple storage classes
 # - VM name customization
@@ -18,7 +17,7 @@ stringData:
   thumbprint: "11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44"
 
 ---
-apiVersion: apps.cozystack.io/v1
+apiVersion: apps.cozystack.io/v1alpha1
 kind: VMImport
 metadata:
   name: production-migration
@@ -38,10 +37,6 @@ spec:
       name: "postgres-primary"
     - id: "vm-201"
       name: "postgres-replica"
-
-  # Warm migration: incremental replication before final cutover
-  # Reduces downtime significantly for large VMs
-  warm: true
 
   # Advanced network mapping
   networkMap:

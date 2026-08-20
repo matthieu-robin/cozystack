@@ -55,7 +55,6 @@ Then the `VMImport` resource:
 | `vms[]` | to migrate | `{id: vm-123, name: target}` — the **MoRef** of each VM |
 | `networkMap[]` | if the VM has NICs | `{sourceId: network-26, destinationType: pod\|multus, ...}` |
 | `storageMap[]` | if the VM has disks | `{sourceId: datastore-13, storageClass: replicated}` |
-| `warm` | optional | warm (incremental) vs cold migration |
 | `enableAdoption` | optional (default true) | create the `VMInstance` in the tenant |
 | `skipGuestConversion` | optional | raw-copy mode (no virt-v2v) — **requires `vddkInitImage`** |
 | `vddkInitImage` | optional | VDDK init image (raw-copy / efficient transfer) |
@@ -110,7 +109,7 @@ The cross-namespace clone is what separates them: it re-copies the whole disk a 
 ## 3. Prerequisites
 
 ### 3.1 Cluster / platform
-- Forklift operator and the `vm-import` app deployed (the `iaas` bundle).
+- Forklift operator, the `vm-adoption-controller`, and the `vm-import` app deployed. These are opt-in on an `iaas` bundle — add `cozystack.forklift`, `cozystack.vm-adoption-controller`, and `cozystack.vm-import-application` to `bundles.enabledPackages` together to turn the feature on.
 - `cert-manager` (used by Forklift webhooks and, optionally, the seccomp webhook).
 
 ### 3.2 Network
@@ -210,11 +209,10 @@ this migration feature depends on it for UEFI sources.
 
 Do not use a vCenter Administrator account. Forklift documents a minimal privilege set that is sufficient to migrate, and the examples in this repository name a dedicated account (`mtv-migration@vsphere.local`) rather than `administrator@vsphere.local` for that reason. A migration credential ends up in a Kubernetes Secret read by the cluster-privileged Forklift controller, so its blast radius is whatever that vCenter account can do — which is the whole argument for scoping it down.
 
-A read-only account is **not** sufficient, because three things a migration does are writes:
+A read-only account is **not** sufficient, because two things a migration does are writes:
 
 - **Reading disks through the VDDK** needs `VirtualMachine.Provisioning.DiskRandomRead`, which opens a disk for reading via the SDK. It sits under *Provisioning*, not under plain inventory read.
 - **Cold migration powers the source VM off** at cutover, so a power-off interaction privilege is required.
-- **Warm migration** (`warm: true`) needs Changed Block Tracking enabled on the VMs and their disks, and creates then removes a snapshot on every incremental pass.
 
 Only inventory collection — what populates the `Plan` — is genuinely read-only. A read-only account therefore lets Forklift *list* the VMs and then fails at transfer time, which is a confusing way to discover the problem.
 

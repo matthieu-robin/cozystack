@@ -53,11 +53,6 @@
         }
       }
     },
-    "warm": {
-      "description": "Enable warm migration (incremental replication before cutover).",
-      "type": "boolean",
-      "default": false
-    },
     "enableAdoption": {
       "description": "Automatically label imported VMs for Cozystack adoption and dashboard visibility.",
       "type": "boolean",

@@ -26,7 +26,6 @@ metadata:
     vm-import.cozystack.io/instance-profile: {{ . | quote }}
     {{- end }}
 spec:
-  warm: {{ default false .Values.warm }}
   skipGuestConversion: {{ default false .Values.skipGuestConversion }}
   xfsCompatibility: {{ default false .Values.xfsCompatibility }}
   {{- with .Values.virtV2vImage }}
