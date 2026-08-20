@@ -366,9 +366,9 @@ tests:
           path: metadata.name
           pattern: ^test-k8s-bootstrap-token-tenant-[0-9a-f]{6}$
         documentIndex: 1
-      # Point 4 of the review: the admin-kubeconfig volume must be optional and
-      # gated by the shared wait-for-kubeconfig init container, so the Pod waits
-      # in init (uncounted by backoffLimit) instead of FailedMount at t0.
+      # The admin-kubeconfig volume must be optional and gated by the shared
+      # wait-for-kubeconfig init container, so the Pod waits in init (uncounted
+      # by backoffLimit) instead of FailedMount at t0.
       - equal:
           path: spec.template.spec.initContainers[0].name
           value: wait-for-kubeconfig
@@ -406,7 +406,7 @@ tests:
     asserts:
       - equal:
           path: metadata.name
-          value: test-k8s-bootstrap-token-tenant-ddf388
+          value: test-k8s-bootstrap-token-tenant-fc314f
         documentSelector:
           path: kind
           value: Job
@@ -421,19 +421,14 @@ tests:
       images:
         kubectl: example.com/kubectl:v9.9.9
     asserts:
-      # Still a valid hashed name ...
-      - matchRegex:
-          path: metadata.name
-          pattern: ^test-k8s-bootstrap-token-tenant-[0-9a-f]{6}$
-        documentSelector:
-          path: kind
-          value: Job
-      # ... but a different one from the default-image render above (e8c6ea),
+      # A different exact hash from the default-image render above (fc314f),
       # proving the hash tracks the rendered spec (the kubectl image is in it),
       # so an image bump lands a fresh Job rather than an immutable-field patch.
-      - notMatchRegex:
+      # Pinned exactly (like the talos-reconcile sibling cases) rather than by
+      # regex, so a hash drift on either render is caught, not silently masked.
+      - equal:
           path: metadata.name
-          pattern: -ddf388$
+          value: test-k8s-bootstrap-token-tenant-dbf53d
         documentSelector:
           path: kind
           value: Job

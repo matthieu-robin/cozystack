@@ -45,15 +45,18 @@
   cluster.yaml): an identical render keeps the name and Helm no-ops it;
   any change that flows into the spec — notably .Values.images.kubectl —
   yields a new name so a fresh Job runs and Helm prunes the old one. The
-  hash also folds in the looked-up bootstrapTokenId, because the token
-  reaches the Job only through secretKeyRef and so never changes the
-  render on its own: without this, a rotated token (a recreated
-  talos-secrets Secret) would leave Helm no-oping a completed Job and the
-  tenant stuck on the stale bootstrap-token. Folding the id in rotates
-  the name on rotation so the new token is applied and the old Job is
-  pruned. (One idempotent re-run happens on the first reconcile after a
-  fresh install, when the looked-up id flips from empty to its value; the
-  kubectl apply is a no-op.)
+  hash also folds in the looked-up bootstrap token — both halves,
+  bootstrapTokenId and bootstrapTokenSecret — because the token reaches
+  the Job only through secretKeyRef and so never changes the render on
+  its own: without this, a rotated token (a recreated talos-secrets
+  Secret) would leave Helm no-oping a completed Job and the tenant stuck
+  on the stale bootstrap-token. talos-secrets.yaml regenerates the two
+  halves independently (each guarded by its own empty check), so a change
+  to either half must rotate the name; folding both in guarantees that.
+  Folding the token in rotates the name on rotation so the new token is
+  applied and the old Job is pruned. (One idempotent re-run happens on
+  the first reconcile after a fresh install, when the looked-up token
+  flips from empty to its value; the kubectl apply is a no-op.)
 */}}
 ---
 apiVersion: v1
@@ -213,18 +216,25 @@ spec:
             secretName: {{ .Release.Name }}-admin-kubeconfig
             optional: true
 {{- end }}
-{{- /* Render the spec, then hash it (plus the looked-up bootstrapTokenId) into
-       a 6-char name suffix so the immutable Job is churn-free across upgrades
-       yet still rotates when its image or the bootstrap token changes. See the
-       header comment. lookup returns empty during `helm template`/unittest, so
-       the token contribution is stable there and the render stays testable. */}}
+{{- /* Render the spec, then hash it (plus the looked-up bootstrap token, both
+       halves) into a 6-char name suffix so the immutable Job is churn-free
+       across upgrades yet still rotates when its image or the bootstrap token
+       changes. See the header comment. lookup returns empty during `helm
+       template`/unittest, so the token contribution is stable there and the
+       render stays testable. */}}
 {{- $jobSpec := include "kubernetes.bootstrap-token-tenant-job-spec" . }}
 {{- $btId := "" }}
+{{- $btSecret := "" }}
 {{- $existing := lookup "v1" "Secret" .Release.Namespace (printf "%s-talos-secrets" .Release.Name) }}
-{{- if and $existing $existing.data (hasKey $existing.data "bootstrapTokenId") }}
-{{-   $btId = index $existing.data "bootstrapTokenId" | b64dec }}
+{{- if and $existing $existing.data }}
+{{-   if hasKey $existing.data "bootstrapTokenId" }}
+{{-     $btId = index $existing.data "bootstrapTokenId" | b64dec }}
+{{-   end }}
+{{-   if hasKey $existing.data "bootstrapTokenSecret" }}
+{{-     $btSecret = index $existing.data "bootstrapTokenSecret" | b64dec }}
+{{-   end }}
 {{- end }}
-{{- $jobHash := printf "%s\n%s" $jobSpec $btId | sha256sum | trunc 6 }}
+{{- $jobHash := printf "%s\n%s\n%s" $jobSpec $btId $btSecret | sha256sum | trunc 6 }}
 {{- /* Truncate the name prefix, never the hash, so the name stays within the
        63-char DNS-label limit while the 6-char content hash is always the
        suffix. A no-op for normal-length release names. */}}
