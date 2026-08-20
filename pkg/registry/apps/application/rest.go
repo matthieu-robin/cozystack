@@ -1281,6 +1281,23 @@ func validateNoInternalKeys(values *apiextv1.JSON) error {
 // chart-generated resource suffixes within the 63-char DNS-1035 label limit.
 const maxHelmReleaseName = 53
 
+// kubernetesKind is the Application.Kind of the parent Kubernetes cluster CR,
+// whose worker pools are separate KubernetesNodes releases.
+const kubernetesKind = "Kubernetes"
+
+// maxKubernetesClusterName caps a Kubernetes cluster name so its worker pools
+// can always render. Since Phase 2 worker pools are separate KubernetesNodes
+// releases named "<cluster>-<pool>" under the "kubernetes-nodes-" prefix (17
+// chars), the smallest such child release is "kubernetes-nodes-<cluster>-md0".
+// The parent's own "kubernetes-" prefix would let the cluster name reach 42,
+// but that leaves no room for even the default "md0" pool's child release
+// (17 + len(cluster) + len("-md0") <= 53 => len(cluster) <= 32). Capping the
+// parent name at admission surfaces the overflow on the Kubernetes CR the
+// operator is editing, instead of at render time on a child that can never be
+// created (the migration pins and skips such a pool, leaving no way to add
+// workers).
+const maxKubernetesClusterName = maxHelmReleaseName - len("kubernetes-nodes-") - len("-md0")
+
 // maxNamespaceName is the DNS-1123 label limit for Kubernetes namespace names.
 // The tenant Helm chart creates a Namespace whose name is the computed
 // workload namespace (parent namespace + "-" + tenant name), so the total
@@ -1305,6 +1322,19 @@ func (r *REST) validateNameLength(name string) field.ErrorList {
 	if maxLen <= 0 {
 		allErrs = append(allErrs, field.Invalid(fldPath, name,
 			fmt.Sprintf("configuration error: no valid name length possible (release prefix %q)", r.releaseConfig.Prefix)))
+		return allErrs
+	}
+
+	// A Kubernetes cluster's worker pools are separate KubernetesNodes releases
+	// named "<cluster>-<pool>", so the parent name must leave room for at least
+	// the default "md0" pool's child release. This is stricter than the parent's
+	// own Helm-prefix budget and fails at admission on the parent rather than at
+	// render time on an un-creatable child (see maxKubernetesClusterName).
+	if r.kindName == kubernetesKind && maxLen > maxKubernetesClusterName {
+		if len(name) > maxKubernetesClusterName {
+			allErrs = append(allErrs, field.Invalid(fldPath, name,
+				fmt.Sprintf("must be no more than %d characters so its worker pools (KubernetesNodes releases named \"kubernetes-nodes-<cluster>-<pool>\") fit the %d-character Helm release name limit", maxKubernetesClusterName, maxHelmReleaseName)))
+		}
 		return allErrs
 	}
 

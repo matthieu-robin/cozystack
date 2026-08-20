@@ -261,6 +261,30 @@ func TestValidateNameLength(t *testing.T) {
 			appName:   strings.Repeat("a", 53-len("tenant-")+1), // 47 chars
 			wantError: true,
 		},
+		// Kubernetes clusters carry a stricter cap than their own Helm prefix
+		// allows, so a worker pool's KubernetesNodes child release
+		// ("kubernetes-nodes-<cluster>-<pool>") still fits the 53-char limit.
+		{
+			name:      "kubernetes short name passes",
+			kindName:  "Kubernetes",
+			prefix:    "kubernetes-",
+			appName:   "prod",
+			wantError: false,
+		},
+		{
+			name:      "kubernetes at pool cap passes",
+			kindName:  "Kubernetes",
+			prefix:    "kubernetes-",
+			appName:   strings.Repeat("a", maxKubernetesClusterName), // 32 chars
+			wantError: false,
+		},
+		{
+			name:      "kubernetes exceeding pool cap fails even though it fits the parent prefix",
+			kindName:  "Kubernetes",
+			prefix:    "kubernetes-",
+			appName:   strings.Repeat("a", maxKubernetesClusterName+1), // 33 chars, still <= 42
+			wantError: true,
+		},
 		{
 			name:      "prefix consuming all helm capacity returns config error",
 			kindName:  "MySQL",
