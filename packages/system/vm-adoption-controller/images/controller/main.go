@@ -902,10 +902,17 @@ func (c *AdoptionController) adoptVM(ctx context.Context, vm kubevirtv1.VirtualM
 		}
 
 		// networkName format is "namespace/name" — extract just the name part
-		// since the vm-instance template re-adds the namespace prefix
+		// since the vm-instance template re-adds the target namespace prefix. A
+		// source NAD in another namespace is therefore silently rebound to a
+		// same-named NAD in the adoption target; warn so an operator can see the
+		// cross-namespace attachment was not preserved (and the VM may fail to
+		// start if no such NAD exists in the target).
 		netRef := networkName
 		if idx := strings.LastIndex(networkName, "/"); idx >= 0 {
 			netRef = networkName[idx+1:]
+			if srcNADNamespace := networkName[:idx]; srcNADNamespace != "" {
+				klog.Warningf("VM %s/%s: network %q references a NetworkAttachmentDefinition in namespace %q; adoption drops the namespace and rebinds to a same-named NAD in the adoption target namespace, which may not exist there", vm.Namespace, vm.Name, networkName, srcNADNamespace)
+			}
 		}
 
 		mappedNetworks = append(mappedNetworks, map[string]interface{}{
