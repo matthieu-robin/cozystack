@@ -102,7 +102,7 @@ data:
        into a permanent upgrade deadlock. The exemption keys on OWNERSHIP BY THE
        CHILD RELEASE (release-name starts with kubernetes-nodes-<cluster>-), not
        on "owned by this parent release": Helm's prune gates on resource-policy
-       alone and never consults the live release-name (see migration 54's
+       alone and never consults the live release-name (see migration 56's
        foreign-owner branch), so a same-cluster unpinned MD whose release-name is
        empty or foreign (Helm annotations stripped out-of-band, or a DR restore
        of the CAPI objects) is ALSO in the parent's prune set and ALSO lost.

@@ -17,7 +17,7 @@ suite: Phase 2 worker-pool adoption guard
 # (P2, "not owned by a child release"); and helm.sh/resource-policy != keep
 # (P3, not pinned). P2 is deliberately NOT "release-name == parent": Helm's
 # prune gates on resource-policy alone and never consults the live release-name
-# (see migration 54), so an empty or foreign release-name is just as prunable as
+# (see migration 56), so an empty or foreign release-name is just as prunable as
 # the parent's and must also be caught. Each render-expecting case below
 # isolates one predicate as its sole discriminator so that deleting that
 # predicate reddens at least one case (per-conjunct non-vacuity):

@@ -1,4 +1,4 @@
-{{- /* Migration 54 adopts pre-split worker objects into this release and pins
+{{- /* Migration 56 adopts pre-split worker objects into this release and pins
        them with helm.sh/resource-policy=keep so the parent kubernetes chart's
        control-plane-only re-render does not prune them during the transition.
        That keep annotation is required only for the transition window; left in
@@ -174,7 +174,7 @@ spec:
               # to unpin -- failing would wedge the HR finalizer (backoffLimit
               # exhausted) on a resource type that no longer exists. Distinguish it
               # by kubectl's two deterministic RESTMapper messages (mirrors
-              # migration 54 list_kmts), never by a message that merely contains
+              # migration 56 list_kmts), never by a message that merely contains
               # "not found". stderr is folded into the captured output only because
               # the strict <BASE>-<6hex> grep below cannot match a kubectl warning
               # line, so a success-path deprecation warning is harmlessly filtered.
