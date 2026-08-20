@@ -82,9 +82,6 @@ type Addons struct {
 	// CoreDNS addon.
 	// +kubebuilder:default:={}
 	Coredns CoreDNSAddon `json:"coredns"`
-	// FluxCD GitOps operator.
-	// +kubebuilder:default:={}
-	Fluxcd FluxCDAddon `json:"fluxcd"`
 	// Gateway API addon.
 	// +kubebuilder:default:={}
 	GatewayAPI GatewayAPIAddon `json:"gatewayAPI"`
@@ -154,15 +151,6 @@ type ControllerManager struct {
 }
 
 type CoreDNSAddon struct {
-	// Custom Helm values overrides.
-	// +kubebuilder:default:={}
-	ValuesOverride k8sRuntime.RawExtension `json:"valuesOverride"`
-}
-
-type FluxCDAddon struct {
-	// Enable FluxCD.
-	// +kubebuilder:default:=false
-	Enabled bool `json:"enabled"`
 	// Custom Helm values overrides.
 	// +kubebuilder:default:={}
 	ValuesOverride k8sRuntime.RawExtension `json:"valuesOverride"`
