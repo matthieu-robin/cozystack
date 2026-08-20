@@ -1735,6 +1735,35 @@ cozyreport_select_objects "nodes" kubectl get nodes --no-headers | awk '$2 != "R
     cozyreport_read_object "$DIR/describe.txt" kubectl describe node "$NAME"
   done
 
+echo "Collecting CertificateSigningRequests..."
+# Node bootstrap goes through this on the HOST cluster too: a Node stuck
+# before Ready with a Pending or missing CSR here is blocked on approval
+# rather than on kubelet startup, which the walk above already covers.
+cozyreport_read_object "$REPORT_DIR/kubernetes/csr.txt" kubectl get csr -o wide
+cozyreport_select_objects "csr" kubectl get csr --no-headers |
+  while read NAME _; do
+    DIR=$REPORT_DIR/kubernetes/csr/$NAME
+    mkdir -p $DIR
+    cozyreport_read_object "$DIR/csr.yaml" kubectl get csr "$NAME" -o yaml
+  done
+
+echo "Collecting tenant kubernetes CertificateSigningRequests..."
+# A Kamaji-fronted tenant cluster is a second apiserver this script has no
+# route to except through the kubeconfig hack/e2e-chainsaw/_lib/run-
+# kubernetes.sh leaves at tenantkubeconfig-<test> when a kubernetes-* test
+# fails before reaching its own success-path cleanup; no file, nothing to walk.
+for TENANT_KC in tenantkubeconfig-*; do
+  [ -f "$TENANT_KC" ] || continue
+  TENANT_NAME=${TENANT_KC#tenantkubeconfig-}
+  DIR=$REPORT_DIR/kubernetes/tenant-csr/$TENANT_NAME
+  mkdir -p $DIR
+  cozyreport_read_object "$DIR/csr.txt" kubectl --kubeconfig "$TENANT_KC" get csr -o wide
+  cozyreport_select_objects "tenant csr ($TENANT_NAME)" kubectl --kubeconfig "$TENANT_KC" get csr --no-headers |
+    while read NAME _; do
+      cozyreport_read_object "$DIR/$NAME.yaml" kubectl --kubeconfig "$TENANT_KC" get csr "$NAME" -o yaml
+    done
+done
+
 echo "Collecting namespaces..."
 cozyreport_read_object "$REPORT_DIR/kubernetes/namespaces.txt" kubectl get ns -o wide
 cozyreport_select_objects "namespaces" kubectl get ns --no-headers | awk '$2 != "Active"' |
