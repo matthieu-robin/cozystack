@@ -28,9 +28,12 @@ metadata:
 spec:
   skipGuestConversion: {{ default false .Values.skipGuestConversion }}
   xfsCompatibility: {{ default false .Values.xfsCompatibility }}
-  {{- with .Values.virtV2vImage }}
-  virtV2vImage: {{ . | quote }}
-  {{- end }}
+  {{- /*
+    No virtV2vImage override here on purpose. It names the privileged conversion
+    pod's image, which is a platform decision rather than a tenant one; the
+    operator pins it through the Forklift package. Forklift falls back to its own
+    default when the field is absent.
+  */}}
   provider:
     source:
       name: {{ .Release.Name }}-source
