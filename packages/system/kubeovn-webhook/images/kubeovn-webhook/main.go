@@ -16,16 +16,50 @@ var (
 	RoutesGlobal       string
 )
 
-// seenClientIssuers records which client-certificate issuers have already been
-// logged, so the observation below costs one line per distinct issuer rather
-// than one per admitted pod.
-var seenClientIssuers sync.Map
+// Observation state for logClientCert. The set is capped on purpose: with
+// tls.RequestClientCert the server accepts whatever certificate a caller
+// offers, so the issuer string is attacker-supplied. An unbounded set would
+// grow with every fabricated issuer and emit a log line for each — a memory
+// and log-volume amplifier reachable by anyone who can open a TCP connection.
+// Past the cap the webhook keeps serving and simply stops recording.
+const maxSeenClientIssuers = 32
+
+var (
+	clientIssuerMu     sync.Mutex
+	seenClientIssuers  = make(map[string]struct{}, maxSeenClientIssuers)
+	clientIssuerCapped bool
+)
+
+// noteClientIssuer reports whether this issuer should be logged: true only when
+// it is new and there is still room to remember it.
+func noteClientIssuer(key string) bool {
+	clientIssuerMu.Lock()
+	defer clientIssuerMu.Unlock()
+	if _, seen := seenClientIssuers[key]; seen {
+		return false
+	}
+	if len(seenClientIssuers) >= maxSeenClientIssuers {
+		if !clientIssuerCapped {
+			clientIssuerCapped = true
+			log.Printf("client certificate: %d distinct issuers observed, no longer recording new ones; if this cap was reached on a quiet cluster the issuers are probably fabricated", maxSeenClientIssuers)
+		}
+		return false
+	}
+	seenClientIssuers[key] = struct{}{}
+	return true
+}
 
 // logClientCert reports, once per distinct issuer, whether the caller presented
 // a client certificate and who signed it.
 //
-// This is the evidence needed to decide whether client-certificate enforcement
-// can be turned on. The handler serves namespace-derived values to whoever asks
+// What it reports is untrusted. With tls.RequestClientCert the certificate is
+// accepted without being verified against anything, so the issuer is a claim
+// and not an identity: it says what reaches this port, and feeds a decision a
+// human makes out of band. Nothing here turns it into a trust decision the
+// process makes for itself — enforcement depends solely on --client-ca-file.
+//
+// This is the evidence needed to decide whether that enforcement can be turned
+// on. The handler serves namespace-derived values to whoever asks
 // (see GHSA-g883-q79m-8225), and the fix is to accept only the API server — but
 // the API server presents a certificate only when the cluster is configured for
 // it (an AdmissionConfiguration with a kubeConfigFile), which is not universal
@@ -39,11 +73,11 @@ func logClientCert(next http.Handler) http.Handler {
 		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 			key = r.TLS.PeerCertificates[0].Issuer.String()
 		}
-		if _, loaded := seenClientIssuers.LoadOrStore(key, struct{}{}); !loaded {
+		if noteClientIssuer(key) {
 			if key == "<none>" {
 				log.Printf("client certificate: none presented — client-ca-file enforcement is NOT yet safe on this cluster")
 			} else {
-				log.Printf("client certificate: presented, issuer %q — enforcement can be enabled with --client-ca-file for this CA", key)
+				log.Printf("client certificate: presented, issuer %q (UNVERIFIED — nothing has checked this certificate, and any caller can claim any issuer). Confirm out of band that this is your API server's CA before pinning it with --client-ca-file", key)
 			}
 		}
 		next.ServeHTTP(w, r)
