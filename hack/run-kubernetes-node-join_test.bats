@@ -234,6 +234,13 @@ stub_collectors() {
   # happens to be running, which is the property this file removes.
   cozy_capture_runner_kernel_cpu_time() { printf 'runner-kernel-cpu-stub\n'; }
   cozy_capture_sandbox_qemu_thread_cpu() { printf 'sandbox-qemu-thread-stub\n'; }
+  # Stubbed on the same ground and for a sharper version of it again: the canary
+  # issues no kubectl read either, so it contributes nothing to the audit below,
+  # and un-stubbed it does not read this machine -- it LOADS it, occupying a
+  # core for a couple of seconds on every case that drives the block. What it
+  # would then record is set by whatever else is running on the machine, which
+  # is the property this file removes.
+  cozy_capture_runner_canary() { printf 'runner-canary-stub\n'; }
 }
 
 # The collectors below are deliberately NOT in stub_collectors, and that is
@@ -896,6 +903,7 @@ assert_file_lacks_pattern() {
       cozy_capture_sandbox_kvm_exits() { :; }
       cozy_capture_runner_kernel_cpu_time() { :; }
       cozy_capture_sandbox_qemu_thread_cpu() { :; }
+      cozy_capture_runner_canary() { :; }
       ghcr_mirror_diagnose() { :; }
       kubectl() { :; }
       cozy_report_node_join_failure test-latest-version
@@ -965,6 +973,7 @@ assert_file_lacks_pattern() {
     cozy_capture_sandbox_kvm_exits() { :; }
     cozy_capture_runner_kernel_cpu_time() { :; }
     cozy_capture_sandbox_qemu_thread_cpu() { :; }
+    cozy_capture_runner_canary() { :; }
     cozy_capture_tenant_worker_block_io() { :; }
     ghcr_mirror_diagnose() { :; }
     cozy_capture_sandbox_node_cpu_time() { :; }
@@ -1043,6 +1052,7 @@ assert_file_lacks_pattern() {
     cozy_capture_sandbox_kvm_exits() { :; }
     cozy_capture_runner_kernel_cpu_time() { :; }
     cozy_capture_sandbox_qemu_thread_cpu() { :; }
+    cozy_capture_runner_canary() { :; }
     cozy_capture_tenant_worker_block_io() { :; }
     ghcr_mirror_diagnose() { :; }
     cozy_report_node_join_failure test-latest-version
@@ -1079,6 +1089,7 @@ assert_file_lacks_pattern() {
     cozy_capture_sandbox_kvm_exits() { :; }
     cozy_capture_runner_kernel_cpu_time() { :; }
     cozy_capture_sandbox_qemu_thread_cpu() { :; }
+    cozy_capture_runner_canary() { :; }
     cozy_capture_tenant_worker_block_io() { :; }
     ghcr_mirror_diagnose() { :; }
     cozy_report_node_join_failure test-latest-version
@@ -1314,7 +1325,13 @@ assert_file_lacks_pattern() {
   budget=$(grep -oE '^COZY_DIAG_PHASE_BUDGET_DEFAULT=[0-9]+' "$lib" | head -n 1 | sed -E 's/.*=//')
   bound=$(grep -oE '^COZY_DIAG_READ_TIMEOUT_DEFAULT=[0-9]+' "$lib" | head -n 1 | sed -E 's/.*=//')
   grace=$(grep -oE '^COZY_DIAG_READ_GRACE_DEFAULT=[0-9]+' "$lib" | head -n 1 | sed -E 's/.*=//')
-  for v in budget bound grace; do
+  # The canary declares a ceiling of its own rather than taking the read bound,
+  # so its arm below is priced from that number and not from `bound`. Read from
+  # the source for the reason every other input to this guard is: a ceiling
+  # raised there and left alone here would be summed at the old figure while the
+  # guard went on reading as satisfied.
+  canary=$(grep -oE '^COZY_CANARY_RUN_BOUND_DEFAULT=[0-9]+' "$lib" | head -n 1 | sed -E 's/.*=//')
+  for v in budget bound grace canary; do
     eval "n=\$$v"
     if [ -z "$n" ]; then
       echo "expected to read $v from $lib; without it this guard reports success for having lost its input" >&2
@@ -1389,6 +1406,15 @@ assert_file_lacks_pattern() {
       # of the console in wall clock.
       cozy_capture_runner_kernel_cpu_time) ahead=$((ahead + bound + grace)) ;;
       cozy_capture_sandbox_qemu_thread_cpu) ahead=$((ahead + bound + grace)) ;;
+      # The fourth reading that brackets the wait, and the only one of them that
+      # is not a read: two arms of fixed work, each under the canary ceiling, so
+      # it is priced at two of those rather than at the read bound the three
+      # above it share. Exempt on a ground of its own rather than theirs: its
+      # samples stand alone, so nothing is orphaned by declining this one, but
+      # the figure is only worth what its nearness to the failure makes it, and
+      # the gate can only decline or defer. Counted all the same, because it
+      # does sit ahead of the console in wall clock.
+      cozy_capture_runner_canary) ahead=$((ahead + 2 * (canary + grace))) ;;
       cozy_capture_tenant_worker_network_counters) ahead=$((ahead + walk)) ;;
       # One walk apiece and read once, so each costs what the expression above
       # prices a capped walk at. Both sit ahead of the console on the same
@@ -1515,6 +1541,7 @@ assert_file_lacks_pattern() {
     'cozy_capture_sandbox_kvm_exits:sandbox kernel KVM counters:cozy_capture_sandbox_kvm_exits' \
     'cozy_capture_runner_kernel_cpu_time:runner kernel CPU time:cozy_capture_runner_kernel_cpu_time' \
     'cozy_capture_sandbox_qemu_thread_cpu:sandbox QEMU per-thread CPU time:cozy_capture_sandbox_qemu_thread_cpu' \
+    'cozy_capture_runner_canary:runner fixed-work canary:_cozy_canary_run_arm' \
     'cozy_capture_tenant_worker_thread_cpu:worker per-thread CPU time:cozy_capture_tenant_worker_thread_cpu _cozy_virt_launcher_listing' \
     'ghcr_mirror_diagnose:ghcr-mirror:ghcr_mirror_diagnose _ghcr_mirror_bounded_read' \
     'talos_image_cache_diagnose:talos-image-cache:talos_image_cache_diagnose _talos_image_cache_bounded_read'; do
@@ -1554,6 +1581,12 @@ ${carrier}
       cozy_capture_sandbox_kvm_exits) phrase='sandbox kernel KVM counters' ;;
       cozy_capture_runner_kernel_cpu_time) phrase='runner kernel CPU time' ;;
       cozy_capture_sandbox_qemu_thread_cpu) phrase='sandbox QEMU per-thread CPU time' ;;
+      # In `guarded` twice over: the body that runs one arm guards the ceiling
+      # it puts around the work, and the capture guards a second check of its
+      # own to decide whether to write the [bounds] note. Both belong to the one
+      # collector the sentence names, so the phrase here answers for the pair
+      # and the arm body is exempted below rather than given a phrase of its own.
+      cozy_capture_runner_canary) phrase='runner fixed-work canary' ;;
       cozy_capture_tenant_worker_thread_cpu) phrase='worker per-thread CPU time' ;;
       ghcr_mirror_diagnose) phrase='ghcr-mirror' ;;
       talos_image_cache_diagnose) phrase='talos-image-cache' ;;
@@ -1567,6 +1600,10 @@ ${carrier}
       # this a list of exemptions rather than a list of everything.
       cozy_diag_read | _ghcr_mirror_bounded_read | _talos_image_cache_bounded_read) continue ;;
       _cozy_cadvisor_node_stream | _cozy_virt_launcher_listing) continue ;;
+      # The canary carries its guard in the body that runs one arm, the way the
+      # cAdvisor captures carry theirs in the stream they share, so the sentence
+      # names the capture and the table above names what makes it true of it.
+      _cozy_canary_run_arm) continue ;;
       cozy_report_node_join_failure | _talos_image_cache_deploy_state) continue ;;
       *)
         echo "$fn guards its call with command -v but this test has no phrase for it; add one here and to the warning" >&2
@@ -1641,6 +1678,8 @@ ${carrier}
       # budget may hand out or withhold.
       cozy_capture_runner_kernel_cpu_time) continue ;;
       cozy_capture_sandbox_qemu_thread_cpu) continue ;;
+      # The fourth bracket half, and also not behind the gate.
+      cozy_capture_runner_canary) continue ;;
       *)
         echo "$fn runs in the diagnostics block but this test has no phrase for it; add one here and to both chainsaw comments" >&2
         exit 1
@@ -1878,6 +1917,7 @@ EOF
     cozy_capture_sandbox_kvm_exits() { :; }
     cozy_capture_runner_kernel_cpu_time() { :; }
     cozy_capture_sandbox_qemu_thread_cpu() { :; }
+    cozy_capture_runner_canary() { :; }
     cozy_capture_tenant_worker_block_io() { :; }
     ghcr_mirror_diagnose() { :; }
     kubectl() { :; }
@@ -1908,7 +1948,10 @@ EOF
   # `bringup` is what the chainsaw comments give for reaching the failure. That is an
   # observed figure and not a ceiling, deliberately: the bringup's own waits already
   # exceed the whole op on ceilings, so a guard written against those would assert a
-  # worst case nobody can state.
+  # worst case nobody can state. The pre-wait halves of the readings that bracket
+  # the node-join wait spend inside it -- the canary's first sample alone is bounded
+  # at two arms of (canary + grace) -- so a collector added before the wait moves
+  # the real figure while this literal sits still.
   #
   # `largest` is the heaviest collector's cost at the pool's MINIMUM size, so it is a
   # floor rather than a ceiling. It is here because admission gates when a collector
@@ -1921,9 +1964,11 @@ EOF
   # wall-clock bound at all; nor a bounded read gated ahead of the console outside
   # the CAPTURE-style call form this walk enumerates, as the LINSTOR resource state
   # read is, whose cost is therefore not summed here; nor a new collector heavier
-  # than the literal, since nothing makes one move it. Those are the residuals, and
-  # the first three exist today rather than hypothetically. All are tracked in
-  # cozystack/cozystack#3666.
+  # than the literal, since nothing makes one move it; nor the pre-wait halves of the four
+  # readings that bracket the wait, which spend inside the bringup term this literal fixes
+  # rather than inside the budget, and which the canary's first sample alone can carry to
+  # two arms of (canary + grace). Those are the residuals, and the first three exist today
+  # rather than hypothetically. All are tracked in cozystack/cozystack#3666.
   bringup=1500
   # 620 was this figure while the guest-Talos walk ran two commands per worker.
   # It now runs four: the service list and the link table were added at a 10s
