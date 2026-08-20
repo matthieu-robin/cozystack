@@ -166,7 +166,7 @@ run_capture() {
   ( set +x; cozy_report_guest_console_wedge ) >"$tmp/out" 2>&1
 
   # If kubevirt/kubevirt#15989 still bites, the suite's own headline reads
-  # "fewer than 2 tenant nodes Ready within 18m" -- byte-identical to the
+  # "fewer than 2 tenant nodes Ready within 29m" -- byte-identical to the
   # failure this instrumentation exists to study. A triager would file the
   # experiment's answer as the known flake. The diagnostic has to name its
   # own worst case before the noise starts.
@@ -1075,7 +1075,7 @@ run_capture() {
   lib=hack/e2e-chainsaw/_lib/run-kubernetes.sh
   # The failure path runs inside a phase whose budget is derived against the
   # whole operation, so it can afford the pool at its maximum. The passing path
-  # has neither a phase nor a budget: it runs inside the same 50m operation the
+  # has neither a phase nor a budget: it runs inside the same 67m operation the
   # suite has already spent most of, and every read it issues is bounded
   # individually but not as a group. A walk over the maximum pool could
   # therefore turn a suite that proved everything it exists to prove into a red

@@ -819,6 +819,12 @@ jobs:
   # workflow_run instead.
   e2e:
     name: "E2E (in-tree)"
+    # What the gate decided, promoted to a job output because the job's RESULT
+    # can no longer answer it: a red the lane tolerated finishes `success`, so
+    # every consumer downstream that reads the result alone would report this run
+    # as one where the suite passed.
+    outputs:
+      soft_red: ${{ steps.e2e_tests.outputs.soft_red }}
     # The sandbox boots three QEMU guests (hack/e2e-prepare-cluster.bats), each
     # with `-smp 8 -m 24576`, so the guests alone demand 24 vCPU and 72 GiB.
     # On the 24-vCPU runner that is a 1:1 CPU commit with zero host headroom for
@@ -835,7 +841,12 @@ jobs:
     # leaving 8 vCPU (25%) and 56 GiB of host headroom, which removes the
     # oversubscription that starves the probes.
     runs-on: oracle-vm-32cpu-128gb-x86-64
-    timeout-minutes: 180
+    # Sized above what the tenant-Kubernetes pair can spend on a failing run, and
+    # held to one figure across every lane that runs the suite. That bound, the
+    # measured run the rest of the margin comes from, and what neither of them
+    # covers are all in hack/node-join-soft-red_test.bats rather than restated
+    # here in four workflows that would then drift apart.
+    timeout-minutes: 215
     permissions:
       contents: read
       packages: read
@@ -1035,6 +1046,20 @@ jobs:
               kubectl get bucketaccesses.objectstorage.k8s.io -A -o custom-columns="NAMESPACE:.metadata.namespace,NAME:.metadata.name,GRANTED:.status.accessGranted,CLAIM:.spec.bucketClaimName" 2>&1
             ' || true
             echo "::endgroup::"
+            # One failure the lane does not block on, and only one: the tenant
+            # node-join deadline. The test itself stays red -- Chainsaw ran its
+            # whole catch above and the report records the failure -- and this
+            # decides only whether the job does. It blocks on anything it cannot
+            # attribute to that deadline, including a report it could not read.
+            if hack/e2e-node-join-soft-red.sh "$SANDBOX_NAME"; then
+              # The breakpoint below opens on `failure()`, which this exit is
+              # about to make false. Record the decision so it can open on this
+              # red too: the sandbox is still up at that point, and a join that
+              # never finished is the failure an interactive session is worth
+              # most on.
+              echo "soft_red=true" >>"$GITHUB_OUTPUT"
+              exit 0
+            fi
             exit 1
           fi
           echo "✅ All selected E2E tests passed"
@@ -1056,7 +1081,7 @@ jobs:
 
       # ▸ Collect debug information (always runs)
       #
-      #   A ceiling of its own, not the job's 180 minutes. `Upload
+      #   A ceiling of its own, not the job's 215 minutes. `Upload
       #   cozyreport.tgz` is the next step and the collector writes its tarball
       #   at the very end of its run, so a read that never returns spends what
       #   is left of the job budget, the job is cancelled, and the upload never
@@ -1067,7 +1092,7 @@ jobs:
       #   30 minutes is measured against the step: it takes 3-42s across sampled
       #   runs, on failed e2e jobs as well as green ones. It RESERVES nothing --
       #   `timeout-minutes` caps a step, it does not carve budget out of the job,
-      #   so a suite that has already burned 175 of the 180 leaves this step five
+      #   so a suite that has already burned 210 of the 215 leaves this step five
       #   minutes and the upload is cancelled with everything else. What the cap
       #   buys is that a hung read cannot be the reason.
       #   `continue-on-error` because the ceiling must not change what the job
@@ -1126,6 +1151,13 @@ jobs:
       #   implies maintainer authorship). authorized-users is kept as a second
       #   defense layer controlling who may actually SSH in.
       #
+      #   A node-join red the lane decided not to block on reaches here as a
+      #   SUCCESSFUL job, so `failure()` alone would skip the step on the one
+      #   failure whose sandbox is worth attaching to. The E2E step records that
+      #   decision and this reads it back. Being label-gated is what makes that
+      #   affordable: the session opens for a PR someone deliberately marked for
+      #   debugging, not on every softened run.
+      #
       #   Uses cozystack/breakpoint-action (fork of namespacelabs/breakpoint-action)
       #   pinned by SHA. The fork adds: pause-idle mode (initial grace period for
       #   the first SSH connection, idle-aware exit afterwards), endpoint output
@@ -1139,10 +1171,15 @@ jobs:
       #   forks cannot reach the self-hosted rendezvous server.
       - name: Breakpoint on E2E failure
         if: |
-          failure() &&
+          (failure() || steps.e2e_tests.outputs.soft_red == 'true') &&
           vars.BREAKPOINT_ENDPOINT != '' &&
           (contains(github.event.pull_request.labels.*.name, 'debug')
             || contains(github.event.pull_request.labels.*.name, 'release'))
+        # A step that fails here fails an otherwise-successful job, which on the
+        # softened path would let a debugging tool overturn a lane that had
+        # decided not to block. Same reason `Collect report` above carries it:
+        # what the job REPORTS must not depend on what a helper did.
+        continue-on-error: true
         # cozystack/breakpoint-action v2-cozy.1
         # mode: pause-idle defaults: grace-period=20m, idle-timeout=10m
         uses: cozystack/breakpoint-action@a6f3a6f87be398ad63b6577351e3398e53f578e4
@@ -1235,6 +1272,7 @@ jobs:
           PLAN_RESULT: ${{ needs.plan.result }}
           CODE: ${{ needs.plan.outputs.code }}
           E2E_RESULT: ${{ needs.e2e.result }}
+          E2E_SOFT_RED: ${{ needs.e2e.outputs.soft_red }}
           CANDIDATE_RESULT: ${{ needs.verify-release-candidate.result }}
           IS_RELEASE: ${{ contains(github.event.pull_request.labels.*.name, 'release') }}
           IS_FULL_E2E: ${{ contains(github.event.pull_request.labels.*.name, 'full-e2e') }}
@@ -1242,7 +1280,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         with:
           script: |
-            const { PLAN_RESULT, CODE, E2E_RESULT, CANDIDATE_RESULT, IS_RELEASE, IS_FULL_E2E, HEAD_SHA, RUN_URL } = process.env;
+            const { PLAN_RESULT, CODE, E2E_RESULT, E2E_SOFT_RED, CANDIDATE_RESULT, IS_RELEASE, IS_FULL_E2E, HEAD_SHA, RUN_URL } = process.env;
             let state, description;
             if (PLAN_RESULT !== 'success') {
               state = 'failure';
@@ -1263,6 +1301,13 @@ jobs:
               // full suite re-run or an admin override.
               state = 'success';
               description = 'release promotion — verified at rc, e2e not repeated (add full-e2e to force a run)';
+            } else if (E2E_RESULT === 'success' && E2E_SOFT_RED === 'true') {
+              // The suite did NOT pass: the tenant node-join deadline expired and
+              // the lane decided not to block on it. `success` is the decision;
+              // this text is the only place a reader standing in front of the
+              // merge button learns what it was a decision about.
+              state = 'success';
+              description = 'in-tree e2e soft: node-join deadline missed, suite failed, merge not blocked';
             } else if (E2E_RESULT === 'success') {
               state = 'success';
               description = 'in-tree e2e passed';

@@ -189,8 +189,8 @@ assert_file_lacks_pattern() {
 }
 
 @test "Kubernetes Chainsaw operations leave room for failure diagnostics" {
-  [ "$(yq 'select(.metadata.name == "kubernetes-latest").spec.steps[0].try[0].script.timeout' hack/e2e-chainsaw/kubernetes-latest/chainsaw-test.yaml)" = 50m ]
-  [ "$(yq 'select(.metadata.name == "kubernetes-previous").spec.steps[0].try[0].script.timeout' hack/e2e-chainsaw/kubernetes-previous/chainsaw-test.yaml)" = 50m ]
+  [ "$(yq 'select(.metadata.name == "kubernetes-latest").spec.steps[0].try[0].script.timeout' hack/e2e-chainsaw/kubernetes-latest/chainsaw-test.yaml)" = 67m ]
+  [ "$(yq 'select(.metadata.name == "kubernetes-previous").spec.steps[0].try[0].script.timeout' hack/e2e-chainsaw/kubernetes-previous/chainsaw-test.yaml)" = 67m ]
 }
 
 @test "orchestrator skips credentials and helper Pod when every VMI lacks an IP" {

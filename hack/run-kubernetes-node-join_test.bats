@@ -2,7 +2,7 @@
 # -----------------------------------------------------------------------------
 # Unit tests for cozy_report_node_join_failure in
 # hack/e2e-chainsaw/_lib/run-kubernetes.sh -- the diagnostics the kubernetes-*
-# suites emit when fewer than 2 tenant nodes become Ready inside the 18m
+# suites emit when fewer than 2 tenant nodes become Ready inside the 29m
 # deadline.
 #
 # What these pin is not what the block prints but that it finishes. It runs
@@ -11,8 +11,8 @@
 # answer in a node-join failure. So every read carries its own wall-clock bound
 # and every walk a cap, because an unbounded read here does not lose only
 # itself: it holds the Chainsaw op until the op is killed, and the tenant
-# crust-gather snapshot that the caller's exit 1 triggers is then lost rather
-# than truncated.
+# crust-gather snapshot the caller reaches after it is then lost rather than
+# truncated.
 #
 # The kubectl stub hangs, refuses and answers in part on purpose. A stub that
 # always answers cleanly would leave every test here green against an entirely
@@ -309,6 +309,68 @@ assert_file_lacks_pattern() {
   esac
 }
 
+# The ceilings both budget guards below price their sums from, read out of the
+# helper rather than restated in each. They are the same numbers held against
+# two different bounds -- the phase budget from below, the operation window from
+# above -- so a second copy of any of them is a scheduled divergence between the
+# two guards.
+#
+# Sets bound, grace, canary, arms, qemu_reads and wedge. Returns non-zero when
+# one of them could not be read: a guard that lost an input sums it as zero and
+# then reports success for the term it no longer covers.
+read_cost_inputs() {
+  local lib="$1"
+  local qemu_pids v n
+
+  bound=$(grep -oE '^COZY_DIAG_READ_TIMEOUT_DEFAULT=[0-9]+' "$lib" | head -n 1 | sed -E 's/.*=//')
+  grace=$(grep -oE '^COZY_DIAG_READ_GRACE_DEFAULT=[0-9]+' "$lib" | head -n 1 | sed -E 's/.*=//')
+  # The canary declares a ceiling of its own rather than taking the read bound,
+  # so whatever is priced from it is priced from that number and not from
+  # `bound`. Read from source for the reason every input here is: a ceiling
+  # raised there and left alone in a guard would be summed at the old figure
+  # while the guard went on reading as satisfied.
+  canary=$(grep -oE '^COZY_CANARY_RUN_BOUND_DEFAULT=[0-9]+' "$lib" | head -n 1 | sed -E 's/.*=//')
+  # The wedge check does not take the shared read bound either: it carries its
+  # own ceiling on its own call, so it is read off that call.
+  wedge=$(awk '/^cozy_report_guest_console_wedge\(\)/,/^}/' "$lib" \
+    | grep -oE 'timeout -k [0-9]+ [0-9]+ kubectl' | head -n 1 \
+    | awk '{print $3 + $4}')
+  # How many sandbox pid files the QEMU thread reading opens. Each is a bounded
+  # call of its own, so that collector spends one ceiling per file and one more
+  # for the probe walk -- a cost a guard that counts it as a single read
+  # under-prices by the whole loop.
+  qemu_pids=$(awk '/^cozy_capture_sandbox_qemu_thread_cpu\(\)/,/^}/' "$lib" \
+    | grep -oE '^  for srv in [0-9 ]+; do' | head -n 1 \
+    | sed -E 's/^  for srv in //; s/; do$//' | wc -w | tr -d ' ')
+  # The canary's arms, counted rather than written as a multiplier: each runs
+  # under a ceiling of its own, so an arm added there costs another one, and a
+  # literal would go on reading as satisfied while the collector spent more than
+  # the guards say it can.
+  arms=$(awk '/^cozy_capture_runner_canary\(\)/,/^}/' "$lib" \
+    | grep -c '^  if _cozy_canary_report_arm ' || true)
+
+  for v in bound grace canary wedge; do
+    eval "n=\$$v"
+    if [ -z "$n" ]; then
+      printf 'expected to read %s from %s; without it a guard sums that term as zero and reports success for having lost its input\n' "$v" "$lib" >&2
+      return 1
+    fi
+  done
+  # Both of these are COUNTS, and a count that found nothing is `0` rather than
+  # nothing -- `wc -w` on an empty pipeline and `grep -c` on no match both print
+  # it. Checking them for emptiness would therefore pass on exactly the input
+  # loss it is meant to catch, and the term would be summed at one arm and one
+  # read instead of what the collectors spend.
+  for v in qemu_pids arms; do
+    eval "n=\$$v"
+    if [ -z "$n" ] || [ "$n" -lt 1 ]; then
+      printf 'read %s as "%s" from %s; that is a count of nothing, so a guard would price the collector it belongs to at nothing\n' "$v" "$n" "$lib" >&2
+      return 1
+    fi
+  done
+  qemu_reads=$((qemu_pids + 1))
+}
+
 @test "no node join diagnostic read escapes a wall clock bound" {
   . hack/e2e-chainsaw/_lib/run-kubernetes.sh
   stub_collectors
@@ -326,7 +388,7 @@ assert_file_lacks_pattern() {
   ( set +x; cozy_report_node_join_failure test-latest-version ) >"$tmp/out" 2>&1
 
   # One unbounded read is the whole defect: against a wedged tenant apiserver it
-  # holds the op to its 50m ceiling, and everything scheduled after it -- the
+  # holds the op to its 67m ceiling, and everything scheduled after it -- the
   # tenant crust-gather snapshot above all -- is lost rather than truncated.
   if [ -s "$unbounded_calls" ]; then
     echo "FAIL: these reads ran with no wall-clock bound:" >&2
@@ -1323,21 +1385,11 @@ assert_file_lacks_pattern() {
   # happen is a collector ahead of it that can spend the budget outright, which
   # turns "cut short" into "never started".
   budget=$(grep -oE '^COZY_DIAG_PHASE_BUDGET_DEFAULT=[0-9]+' "$lib" | head -n 1 | sed -E 's/.*=//')
-  bound=$(grep -oE '^COZY_DIAG_READ_TIMEOUT_DEFAULT=[0-9]+' "$lib" | head -n 1 | sed -E 's/.*=//')
-  grace=$(grep -oE '^COZY_DIAG_READ_GRACE_DEFAULT=[0-9]+' "$lib" | head -n 1 | sed -E 's/.*=//')
-  # The canary declares a ceiling of its own rather than taking the read bound,
-  # so its arm below is priced from that number and not from `bound`. Read from
-  # the source for the reason every other input to this guard is: a ceiling
-  # raised there and left alone here would be summed at the old figure while the
-  # guard went on reading as satisfied.
-  canary=$(grep -oE '^COZY_CANARY_RUN_BOUND_DEFAULT=[0-9]+' "$lib" | head -n 1 | sed -E 's/.*=//')
-  for v in budget bound grace canary; do
-    eval "n=\$$v"
-    if [ -z "$n" ]; then
-      echo "expected to read $v from $lib; without it this guard reports success for having lost its input" >&2
-      return 1
-    fi
-  done
+  read_cost_inputs "$lib" || return 1
+  if [ -z "$budget" ]; then
+    echo "expected to read budget from $lib; without it this guard reports success for having lost its input" >&2
+    return 1
+  fi
   # Every walk's cap, not the first one, and not only the ones spelled
   # `max_nodes`: the subjects declare their own literal and two of them are
   # equal today, so taking the first would be right by accident, and a subject
@@ -1387,8 +1439,10 @@ assert_file_lacks_pattern() {
     case "$fn" in
       # Not behind the phase gate at all: it runs ahead of the headline so the
       # console experiment's own failure is named before the wording that
-      # matches the bug it studies, and it is two bounded reads.
-      cozy_report_guest_console_wedge) continue ;;
+      # matches the bug it studies. Priced all the same, and at its own ceiling
+      # rather than the shared read bound, because ungated is not free -- it
+      # spends ahead of the console exactly like the gated collectors below it.
+      cozy_report_guest_console_wedge) ahead=$((ahead + wedge)) ;;
       # Not behind the phase gate either, and for a reason of its own: it is the
       # second half of a pair whose first reading was taken before the node-join
       # wait, so declining it would not save a reading, it would orphan one
@@ -1396,25 +1450,27 @@ assert_file_lacks_pattern() {
       # ahead of the console in wall clock, and one bounded read is a cost this
       # arm can state exactly, unlike a walk whose size follows the sandbox.
       cozy_capture_sandbox_kvm_exits) ahead=$((ahead + bound + grace)) ;;
-      # The other two halves of the same shape, and priced identically. The
-      # runner-kernel reading is one bounded read of /proc/stat; the QEMU
-      # thread reading is one bounded probe walk of this container's own /proc
-      # plus three bounded pid-file reads, all under the same ceiling the arm
-      # prices. Each pair's first half is taken before the wait, so declining
-      # either here would orphan a reading taken eighteen minutes earlier
-      # rather than save one. Counted all the same, because they do sit ahead
-      # of the console in wall clock.
+      # The other two halves of the same shape. Each pair's first half is taken
+      # before the wait, so declining either here would orphan a reading taken
+      # a 29m node-join wait earlier rather than save one. Counted all the same,
+      # because they do sit ahead of the console in wall clock.
+      #
+      # They are not priced identically, and that is the point of reading the
+      # count: the runner-kernel reading is one bounded read of /proc/stat, and
+      # the QEMU thread reading is a bounded probe walk plus one bounded read
+      # per sandbox pid file. Those are separate calls under separate ceilings,
+      # so the second can spend several times what the first can.
       cozy_capture_runner_kernel_cpu_time) ahead=$((ahead + bound + grace)) ;;
-      cozy_capture_sandbox_qemu_thread_cpu) ahead=$((ahead + bound + grace)) ;;
+      cozy_capture_sandbox_qemu_thread_cpu) ahead=$((ahead + qemu_reads * (bound + grace))) ;;
       # The fourth reading that brackets the wait, and the only one of them that
-      # is not a read: two arms of fixed work, each under the canary ceiling, so
-      # it is priced at two of those rather than at the read bound the three
-      # above it share. Exempt on a ground of its own rather than theirs: its
+      # is not a read: arms of fixed work, each under the canary ceiling, so it
+      # is priced at one of those per arm rather than at the read bound the
+      # three above it share. Exempt on a ground of its own rather than theirs: its
       # samples stand alone, so nothing is orphaned by declining this one, but
       # the figure is only worth what its nearness to the failure makes it, and
       # the gate can only decline or defer. Counted all the same, because it
       # does sit ahead of the console in wall clock.
-      cozy_capture_runner_canary) ahead=$((ahead + 2 * (canary + grace))) ;;
+      cozy_capture_runner_canary) ahead=$((ahead + arms * (canary + grace))) ;;
       cozy_capture_tenant_worker_network_counters) ahead=$((ahead + walk)) ;;
       # One walk apiece and read once, so each costs what the expression above
       # prices a capped walk at. Both sit ahead of the console on the same
@@ -1768,7 +1824,10 @@ EOF
   # own legend says it priced the join. Since the green run is what the red ones
   # are read against, that does not merely widen the green number, it removes
   # the comparison the collector exists for.
-  wait_line=$(grep -n '^  if ! timeout 18m bash -c' "$lib" | head -n 1 | cut -d: -f1)
+  # Anchored on the wait's own body rather than on its shape: `timeout Nm bash -c`
+  # matches more than one line in the library, and picking the first would
+  # re-anchor this check the day another one is added above it.
+  wait_line=$(awk '/^  timeout [0-9]+m bash -c/ { cand = NR; next } cand && NR == cand + 1 && /get nodes --no-headers/ { print cand; exit } { cand = 0 }' "$lib")
   first=$(grep -n 'cozy_capture_sandbox_kvm_exits 1' "$lib" | head -n 1 | cut -d: -f1)
   # The green second reading, found as the one after the wait rather than by
   # position in the file: the other call with the same argument is the failure
@@ -1799,8 +1858,8 @@ EOF
   fi
   # And the same claim on the failing side, which is the half that has no
   # equivalent of the tail to fail against and so would otherwise widen in
-  # silence. The failure block's own reads are bounded and small against an 18m
-  # wait, so this is not about today's arithmetic; it is that a collector
+  # silence. The failure block's own reads are bounded and small against a
+  # 29m node-join wait, so this is not about today's arithmetic; it is that a collector
   # inserted ahead of the reading later moves the red interval while the
   # symmetric mistake on the green side fails loudly.
   red=$(awk -v w="$wait_line" 'NR < w && /cozy_capture_sandbox_kvm_exits 2/ { line = NR } END { if (line) print line }' "$lib")
@@ -1942,16 +2001,22 @@ EOF
   #
   #   budget + largest collector cost + snapshot <= op - bringup
   #
-  # Two of its terms are literals below rather than read from source, and each is a
-  # literal for a reason worth knowing before this guard is trusted.
+  # `bringup` is not one figure but three, and only the first is a literal.
   #
-  # `bringup` is what the chainsaw comments give for reaching the failure. That is an
-  # observed figure and not a ceiling, deliberately: the bringup's own waits already
-  # exceed the whole op on ceilings, so a guard written against those would assert a
-  # worst case nobody can state. The pre-wait halves of the readings that bracket
-  # the node-join wait spend inside it -- the canary's first sample alone is bounded
-  # at two arms of (canary + grace) -- so a collector added before the wait moves
-  # the real figure while this literal sits still.
+  # `prejoin` is what the run spends before the node-join wait starts, and there is
+  # no expression that yields it. An observed figure and not a ceiling,
+  # deliberately: the bringup's own bounded waits already exceed the whole op
+  # between them -- two ten-minute HelmRelease waits alone -- so a guard written
+  # against those would assert a worst case nobody can state. It is the figure this
+  # guard carried for the whole path to the failure, with the deadline that used to
+  # sit inside it taken out and read from source instead. That split is the point:
+  # raising the deadline moves `bringup` and leaves this term alone. Re-measuring
+  # it takes a green run's own timings, not arithmetic on this page.
+  #
+  # The deadline and the four readings taken between the bringup and the wait are
+  # read from the source that sets them instead, so raising either moves this term
+  # rather than leaving it behind. Until they were, a collector added before the
+  # wait moved the real figure while a single literal sat still.
   #
   # `largest` is the heaviest collector's cost at the pool's MINIMUM size, so it is a
   # floor rather than a ceiling. It is here because admission gates when a collector
@@ -1959,17 +2024,16 @@ EOF
   # drops that term accepts a budget under which the phase finishes past the window.
   #
   # So this catches a budget raised past what today's collectors leave room for, and
+  # a node-join deadline raised past what the operation can carry behind it, and
   # nothing else. It does not cover the guest-Talos walk growing with the pool, which
   # carries no cap; nor the collector gated last, whose image-cache re-probe has no
   # wall-clock bound at all; nor a bounded read gated ahead of the console outside
-  # the CAPTURE-style call form this walk enumerates, as the LINSTOR resource state
-  # read is, whose cost is therefore not summed here; nor a new collector heavier
-  # than the literal, since nothing makes one move it; nor the pre-wait halves of the four
-  # readings that bracket the wait, which spend inside the bringup term this literal fixes
-  # rather than inside the budget, and which the canary's first sample alone can carry to
-  # two arms of (canary + grace). Those are the residuals, and the first three exist today
-  # rather than hypothetically. All are tracked in cozystack/cozystack#3666.
-  bringup=1500
+  # `cozy_… || true` call form the sibling guard enumerates, as the LINSTOR resource
+  # state read is, whose cost is therefore not summed here; nor a new collector heavier
+  # than the literal, since nothing makes one move it; nor whatever the bringup spends
+  # that `prejoin` does not observe. Those are the residuals, and the first three exist
+  # today rather than hypothetically. All are tracked in cozystack/cozystack#3666.
+  prejoin=420
   # 620 was this figure while the guest-Talos walk ran two commands per worker.
   # It now runs four: the service list and the link table were added at a 10s
   # bound with the usual 5s kill grace, which is 2 x 2 x 15 = 60 more seconds
@@ -1980,13 +2044,36 @@ EOF
   # change is answerable for.
   largest=680
   lib=hack/e2e-chainsaw/_lib/run-kubernetes.sh
+  read_cost_inputs "$lib" || exit 1
   # Read from the named default rather than from the `:-` expansion: the defaults are
   # declared once as constants, so that is where the number lives now.
   budget=$(grep -oE '^COZY_DIAG_PHASE_BUDGET_DEFAULT=[0-9]+' "$lib" | head -n 1 | sed -E 's/.*=//')
-  if [ -z "$budget" ]; then
-    echo "expected a default for COZY_DIAG_PHASE_BUDGET in $lib" >&2
-    exit 1
-  fi
+  # The node-join deadline, read off the wait itself. Raising it is exactly the
+  # change this guard exists to follow, so a copy of the number here would sit
+  # still while the window it prices moved underneath it.
+  # Anchored on the wait's own body, like the sibling guard: `timeout Nm bash -c`
+  # matches more than one line here, so a shape match plus `head -n 1` would
+  # start reading a different wait the day one is added above this one.
+  join=$(awk '/^  timeout [0-9]+m bash -c/ { cand = $0; next } cand && /get nodes --no-headers/ { print cand; exit } { cand = "" }' "$lib" | grep -oE '[0-9]+')
+  # The operation the suites give the script, read from the constant that
+  # restates it. That constant is held against both suites' own `timeout:` by a
+  # guard in hack/run-kubernetes-serial-console_test.bats, so reading it here is
+  # reading the suites at one remove rather than trusting a third copy.
+  op=$(grep -oE '^COZY_OP_CEILING=[0-9]+' "$lib" | head -n 1 | sed -E 's/.*=//')
+  for v in budget join op; do
+    eval "n=\$$v"
+    if [ -z "$n" ]; then
+      echo "expected to read $v from $lib; without it this guard reports success for having lost its input" >&2
+      exit 1
+    fi
+  done
+  # What the four readings that bracket the wait spend on its near side. Their
+  # first halves are taken while the bringup is still running, so they belong in
+  # this term or in none. Three are bounded reads -- one of which opens a file
+  # per sandbox node before its walk -- and the fourth is the canary's arms,
+  # each under a ceiling of its own.
+  prewait=$(( arms * (canary + grace) + (qemu_reads + 2) * (bound + grace) ))
+  bringup=$(( prejoin + (join * 60) + prewait ))
   # The snapshot's own wall-clock bound, read from the source rather than restated,
   # since a budget that leaves room for a number the collector no longer uses
   # leaves room for nothing.
@@ -2000,9 +2087,7 @@ EOF
     exit 1
   fi
   snapshot=$((snapshot + 30))
-  # 50m is what both suites give the op, pinned by its own guard in
-  # hack/run-kubernetes-talos-diagnostics_test.bats.
-  window=$((3000 - bringup))
+  window=$((op - bringup))
   if [ "$((budget + largest + snapshot))" -gt "$window" ]; then
     echo "phase budget ${budget}s + largest collector ${largest}s + snapshot ${snapshot}s exceeds the ${window}s left after ${bringup}s of bringup" >&2
     echo "the phase can then end past the point where the snapshot still fits, which is what the budget exists to prevent" >&2
@@ -2035,9 +2120,212 @@ EOF
   rc=0
   ( set +x; cozy_report_node_join_failure test-latest-version ) >"$tmp/out" 2>&1 || rc=$?
 
-  # The caller's `exit 1` is what fails the suite and what triggers the tenant
-  # snapshot. A non-zero return here replaces it under `set -e`, so a collector
-  # that could not read anything would decide the suite's exit status.
+  # The caller chooses the exit, and on the node-join path that choice is what
+  # the tenant snapshot keys on. A non-zero return here replaces it under
+  # `set -e`, so a collector that could not read anything would decide the
+  # suite's exit status instead.
   [ "$rc" -eq 0 ]
   rm -rf "$tmp"
+}
+
+@test "the node-join deadline leaves an annotation and a marker, and does not touch the exit" {
+  . hack/e2e-chainsaw/_lib/run-kubernetes.sh
+  tmp=$(mktemp -d)
+  use_temp_report_dir "$tmp"
+  export COZY_SNAPSHOT_NAME=kubernetes-latest
+  _COZY_NODE_JOIN_SOFT_RED=0
+
+  # `set +x` like every other capture in this file, and here it is the assertion
+  # that depends on it rather than the readability: cozytest.sh runs each test
+  # under `set -x`, the trace of the `echo` carries the annotation text verbatim,
+  # and it lands in the same file this test then greps. Left traced, all three
+  # assertions below pass against a collector that emits nothing -- and only
+  # under the runner CI actually uses.
+  rc=0
+  ( set +x; cozy_soft_red_node_join test-latest-version ) >"$tmp/out" 2>&1 || rc=$?
+
+  # This function records; the caller fails. A non-zero return here would reach
+  # the caller under `set -e` and replace the exit it chose, which is the one
+  # thing a recorder must not do.
+  [ "$rc" -eq 0 ]
+  # The annotation is the only surface that reaches a reader who sees a green
+  # job and never opens the log, so it is asserted as an annotation and not
+  # merely as a line of text.
+  assert_file_contains '::warning title=node-join::' "$tmp/out"
+  # And it carries the deadline it is about. A warning that says only "the join
+  # failed" leaves a reader unable to tell it from the wait having been raised.
+  assert_file_contains 'Ready within 29m' "$tmp/out"
+  # `::error` over a step that exits zero states a contradiction, and GitHub
+  # renders it beside genuine failures.
+  assert_file_lacks_pattern '::error' "$tmp/out"
+
+  marker="$tmp/report/snapshots/kubernetes-latest/SOFT-RED-node-join.txt"
+  [ -f "$marker" ]
+  # Named for the run it belongs to: the report holds one directory per suite,
+  # and a marker that does not say which cluster it is about cannot be counted
+  # across runs, which is the only reason it is written to a file at all.
+  assert_file_contains 'test-latest-version' "$marker"
+
+  unset COZY_SNAPSHOT_NAME
+  rm -rf "$tmp"
+}
+
+@test "no exit in the suite body is a zero, and the marker is written under the deadline test" {
+  lib=hack/e2e-chainsaw/_lib/run-kubernetes.sh
+  # The suite fails on every failure it has, the node-join deadline included.
+  # That is what keeps Chainsaw's catch running and the report honest, and it is
+  # what the lane's tolerance is built on top of rather than instead of: a zero
+  # exit here would buy a green check by throwing away the four collectors keyed
+  # on the test failing, which is the shape this design exists to avoid.
+  #
+  # What this holds is that shape, and it is worth saying what it does not: it
+  # does not prove every remaining assertion still fails the suite -- a `|| true`
+  # appended to one of them is invisible here, and telling that apart from the
+  # `|| true` every collector legitimately carries needs a classification this
+  # file does not have.
+  # The function's own control flow, not a program it hands to something else.
+  # The hairpin probe passes a shell script to `sh -c` inside a Pod, and that
+  # script's `exit 0` decides the Pod's status rather than the suite's -- so the
+  # quoted argument is cut out here rather than separated by indentation, which
+  # is what an earlier version of this guard tried: the function's own arms
+  # reach twelve spaces, so any depth bound that excluded the Pod excluded two
+  # levels of real control flow with it. If the quoting around that argument
+  # ever changes shape, the cut stops matching and its `exit 0` is counted --
+  # the guard fails loudly rather than quietly widening.
+  body=$(awk '
+    !inf && /^run_kubernetes_test\(\)/ { inf = 1; next }
+    !inf { next }
+    /^}/ { exit }
+    /--command -- sh -c "/ { inpod = 1; next }
+    inpod { if ($0 ~ /^ *"$/) { inpod = 0 } next }
+    { print }
+  ' "$lib")
+  if [ -z "$body" ]; then
+    echo "expected to read run_kubernetes_test from $lib; without it this guard checked nothing" >&2
+    return 1
+  fi
+  # What this counts is `exit 0` written out. A `return 0` from the function, or
+  # an `exit "$rc"` that happens to carry zero, is outside what a source walk can
+  # see, and saying so is cheaper than implying the walk is exhaustive.
+  zeros=$(printf '%s\n' "$body" | grep -cE '^ *exit 0$' || true)
+  if [ "$zeros" -ne 0 ]; then
+    echo "run_kubernetes_test has $zeros zero exits of its own; a failure that exits zero takes Chainsaw's catch, the previous-instance logs, the host snapshot and the event dump with it, and buys a green check with the evidence" >&2
+    return 1
+  fi
+  # And the marker call sits inside the branch the node-join wait opens, under
+  # the test that says which non-zero the wrapper gave. Without that gate the
+  # branch marks a wait that could not run at all as a deadline the lane
+  # tolerates, which is a different claim about a different failure.
+  # Anchored on the wait's own body rather than on its shape: `timeout Nm bash -c`
+  # matches more than one line in the library, and picking the first would
+  # re-anchor this check the day another one is added above it.
+  wait_line=$(awk '/^  timeout [0-9]+m bash -c/ { cand = NR; next } cand && NR == cand + 1 && /get nodes --no-headers/ { print cand; exit } { cand = 0 }' "$lib")
+  call_line=$(grep -n 'cozy_soft_red_node_join "' "$lib" | head -n 1 | cut -d: -f1)
+  gate_line=$(grep -n 'if cozy_node_join_deadline_expired ' "$lib" | head -n 1 | cut -d: -f1)
+  for v in wait_line call_line gate_line; do
+    eval "n=\$$v"
+    if [ -z "$n" ]; then
+      echo "expected to read $v from $lib; without it this guard reports success for having lost its input" >&2
+      return 1
+    fi
+  done
+  # The discriminator is 124, which `timeout` gives when it fired. A `-k` on this
+  # call -- the house idiom on every other bounded read in the file -- makes a
+  # child that ignores SIGTERM come back as 137 instead, and the softening then
+  # silently stops applying to the case it was written for. It fails toward hard
+  # red, so it breaks nothing; it just stops working with no sign.
+  if sed -n "${wait_line}p" "$lib" | grep -q ' -k '; then
+    echo "the node-join wait carries -k; a child that ignores SIGTERM then returns 137 rather than 124, and the softened deadline stops recognising its own case" >&2
+    return 1
+  fi
+  end_line=$(awk -v s="$wait_line" 'NR > s && /^  fi$/ { print NR; exit }' "$lib")
+  if [ -z "$end_line" ]; then
+    echo "expected the node-join wait's branch to close in $lib" >&2
+    return 1
+  fi
+  if [ "$call_line" -lt "$wait_line" ] || [ "$call_line" -gt "$end_line" ]; then
+    echo "cozy_soft_red_node_join is called at line $call_line, outside the node-join wait's failure branch (lines $wait_line to $end_line); the softening covers that deadline and nothing else" >&2
+    return 1
+  fi
+  if [ "$gate_line" -lt "$wait_line" ] || [ "$gate_line" -gt "$call_line" ]; then
+    echo "the softening at line $call_line is not gated by cozy_node_join_deadline_expired between the wait (line $wait_line) and itself; a branch that softens whatever the wrapper returned reports slow workers for a wait that never ran" >&2
+    return 1
+  fi
+  # And it is written before the diagnostics rather than after them. That phase
+  # spends minutes under a job cap that can end the run inside it, and a marker
+  # written on the far side of it is missing on exactly the runs that spent
+  # longest -- which the lane reads as a failure it cannot attribute.
+  diag_line=$(awk -v s="$wait_line" 'NR > s && /^    cozy_report_node_join_failure "/ { print NR; exit }' "$lib")
+  if [ -z "$diag_line" ]; then
+    echo "expected the node-join failure diagnostics to be called from the wait's branch in $lib; without it this guard reports success for having lost its input" >&2
+    return 1
+  fi
+  if [ "$call_line" -gt "$diag_line" ]; then
+    echo "the marker is written at line $call_line, after the diagnostics phase at line $diag_line; a run the job cap ends inside that phase then carries no marker and blocks as an unattributable red" >&2
+    return 1
+  fi
+}
+
+@test "only the status that means the deadline expired is softened" {
+  . hack/e2e-chainsaw/_lib/run-kubernetes.sh
+  # 124 is what `timeout` returns when it fired, and it is the whole of what the
+  # softening is about. The wrapper's other failures arrive in the same shape
+  # and mean the wait did not run: 125 is `timeout` itself failing, 126 and 127
+  # are the shell being unusable or absent, and 128+n is that shell killed by a
+  # signal -- 137 above all, which on this path is the OOM killer on the loaded
+  # runner the whole change is about. Reporting any of those as "the workers
+  # were slow" is the one claim this must not start making.
+  if ! cozy_node_join_deadline_expired 124; then
+    echo "exit 124 is timeout firing, and it is the status the softening exists for" >&2
+    return 1
+  fi
+  for rc in 1 2 125 126 127 137 143; do
+    if cozy_node_join_deadline_expired "$rc"; then
+      echo "exit $rc was read as the node-join deadline expiring; that status means the wait did not run, and softening it reports a slow cluster for a broken harness" >&2
+      return 1
+    fi
+  done
+}
+
+@test "every minute figure written beside a node-join referent is the deadline" {
+  lib=hack/e2e-chainsaw/_lib/run-kubernetes.sh
+  minutes=$(awk '/^  timeout [0-9]+m bash -c/ { cand = $0; next } cand && /get nodes --no-headers/ { print cand; exit } { cand = "" }' "$lib" | grep -oE '[0-9]+')
+  if [ -z "$minutes" ]; then
+    echo "expected to read the node-join deadline from $lib; without it this guard reports success for having lost its input" >&2
+    return 1
+  fi
+  # The deadline is quoted in the failure headline, in the warning annotation, in
+  # the marker, and in comments across six files that reason about how long the
+  # wait is. Swept by what the sentence is ABOUT rather than by exact string: the
+  # copies say it in different words -- "Ready within", "became Ready inside",
+  # "node-Ready wait", "node-join budget" -- and a sweep by one spelling finds
+  # whichever copy it was written from and leaves the rest quoting a deadline
+  # that moved.
+  #
+  # What it can reach, said rather than implied, because the boundary is where
+  # this stops being a guarantee: grep is line-based, so a figure only counts as
+  # quoted about the node-join when it shares a line with something naming the
+  # node-join. Every copy in the tree was written or rewrapped to satisfy that;
+  # a future one that puts the referent a line away is outside this sweep and
+  # nothing here will notice, and so is one that spells the figure in words.
+  # Both spellings of the unit are in, `29m` and `29 minutes`, because prose
+  # written for a reader tends to the second and a sweep that saw only the first
+  # would leave the documentation quoting a deadline that moved.
+  pattern='(node-join|node-Ready|nodes Ready|become Ready|became Ready|Ready within)[^0-9]{0,60}[0-9]+ ?m|[0-9]+ ?m[^0-9]{0,30}(node-join|node-Ready|nodes Ready)'
+  quoted=$(grep -rnE "$pattern" hack/ docs/ || true)
+  count=$(printf '%s\n' "$quoted" | grep -c . || true)
+  # A floor, not a count: the sweep is worth nothing if the sentence stopped
+  # being written anywhere, and every branch below would then agree vacuously.
+  # Set just under what the tree carries today, so a copy going out of reach is
+  # noticed while a copy legitimately deleted is not a failure.
+  if [ "$count" -lt 18 ]; then
+    echo "this pattern found the node-join deadline quoted in $count places, and the tree quotes it in more than that; it has stopped matching what it was written to sweep, so the check below would pass over whatever it no longer sees" >&2
+    return 1
+  fi
+  stale=$(printf '%s\n' "$quoted" | grep -vE "${minutes}m|${minutes} minutes" || true)
+  if [ -n "$stale" ]; then
+    echo "these quote a node-join deadline that is not the ${minutes}m the wait gives:" >&2
+    printf '%s\n' "$stale" >&2
+    return 1
+  fi
 }
