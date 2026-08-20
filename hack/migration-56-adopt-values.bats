@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # -----------------------------------------------------------------------------
-# Unit tests for platform migration 54 (adopt pre-split worker pools into
+# Unit tests for platform migration 56 (adopt pre-split worker pools into
 # per-pool kubernetes-nodes HelmReleases).
 #
 # These pin the value-mapping contract that guarantees "byte-identical child
@@ -28,11 +28,11 @@
 # own line; there is no bats `run`/`$status`/`setup`/`teardown`. Assertions are
 # direct shell tests that exit non-zero on failure.
 #
-# Run with: hack/cozytest.sh hack/migration-54-adopt-values.bats
+# Run with: hack/cozytest.sh hack/migration-56-adopt-values.bats
 # -----------------------------------------------------------------------------
 
-FAKEBIN="$PWD/hack/testdata/migration-54"
-MIG="$PWD/packages/core/platform/images/migrations/migrations/54"
+FAKEBIN="$PWD/hack/testdata/migration-56"
+MIG="$PWD/packages/core/platform/images/migrations/migrations/56"
 
 # prep resets PATH/env to a clean scenario: one tenant Kubernetes HR (test3)
 # with a single pool md0 and NON-default talos/version/images so the assertions
@@ -111,7 +111,7 @@ JSON
 @test "implicit md0: an empty nodeGroups materialises the default ingress-nginx pool" {
   prep
   # A parent cluster whose spec.values carries no nodeGroups relied on the chart's
-  # implicit md0 default. Migration 54 must materialise DEFAULT_MD0 and create the
+  # implicit md0 default. Migration 56 must materialise DEFAULT_MD0 and create the
   # child HR kubernetes-nodes-<cluster>-md0 with minReplicas 0 and the
   # ingress-nginx role, so a cluster that never set nodeGroups keeps its pool.
   cat > "$FAKE_HR_LIST" <<'JSON'

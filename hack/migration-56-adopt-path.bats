@@ -1,8 +1,8 @@
 #!/usr/bin/env bats
 # -----------------------------------------------------------------------------
-# Unit tests for the ADOPTION path of platform migration 54.
+# Unit tests for the ADOPTION path of platform migration 56.
 #
-# migration-54-adopt-values.bats pins the jq value-mapping; this file pins the
+# migration-56-adopt-values.bats pins the jq value-mapping; this file pins the
 # adopt_one branch that mutates ownership of running worker objects (annotate
 # helm.sh/resource-policy=keep + meta.helm.sh/release-name). The fake kubectl
 # serves worker objects via FAKE_OBJS ("<res> <name> <release-name>" lines) and
@@ -16,11 +16,11 @@
 #
 # cozytest.sh awk parser: @test blocks only, a bare `}` at column 0 ends a test,
 # no run/$status/setup/teardown. Assertions are direct shell tests.
-# Run with: hack/cozytest.sh hack/migration-54-adopt-path.bats
+# Run with: hack/cozytest.sh hack/migration-56-adopt-path.bats
 # -----------------------------------------------------------------------------
 
-FAKEBIN="$PWD/hack/testdata/migration-54"
-MIG="$PWD/packages/core/platform/images/migrations/migrations/54"
+FAKEBIN="$PWD/hack/testdata/migration-56"
+MIG="$PWD/packages/core/platform/images/migrations/migrations/56"
 
 prep() {
   chmod +x "$FAKEBIN/kubectl"
@@ -309,7 +309,7 @@ OBJS
   prep
   # kubectl exits 1 for NotFound and for a transient server failure alike. If a
   # timeout were classified as "absent", adoption would be skipped WITHOUT the
-  # keep pin, the migration would complete and stamp 55 (never re-running), and
+  # keep pin, the migration would complete and stamp 57 (never re-running), and
   # the parent's control-plane-only upgrade would prune the live pool's
   # MachineDeployment -- deleting every running worker VM. The migration must
   # instead exit non-zero with no stamp, so run-migrations.sh retries it.
@@ -424,7 +424,7 @@ OBJS
   # A conversion-webhook outage mid-upgrade fails a read with e.g.
   # 'conversion webhook ... failed: service "capi-webhook-service" not found'.
   # That is a transient failure, not absence: classifying it as absent would
-  # skip the keep pin, stamp 55, and let the parent upgrade prune the live
+  # skip the keep pin, stamp 57, and let the parent upgrade prune the live
   # pool. Only real absence (--ignore-not-found success + empty output) may be
   # skipped; every read failure aborts, whatever its message says.
   export FAKE_GET_FAIL="machinedeployment"
