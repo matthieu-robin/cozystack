@@ -1150,7 +1150,7 @@ func (c *AdoptionController) releaseSourceVM(ctx context.Context, vm kubevirtv1.
 
 	helmReleaseName := "vm-instance-" + vmInstanceName
 	if targetNamespace != vm.Namespace {
-		if err := c.labelVMAsAdopted(ctx, vm.Namespace, vm.Name, vmInstanceName, helmReleaseName); err != nil {
+		if err := c.labelVMAsAdopted(ctx, vm.Namespace, vm.Name, vmInstanceName, targetNamespace, helmReleaseName); err != nil {
 			return fmt.Errorf("failed to label source VM %s/%s as adopted: %w", vm.Namespace, vm.Name, err)
 		}
 		return nil
@@ -1174,7 +1174,13 @@ func (c *AdoptionController) releaseSourceVM(ctx context.Context, vm kubevirtv1.
 	return nil
 }
 
-func (c *AdoptionController) labelVMAsAdopted(ctx context.Context, namespace, vmName, vmInstanceName, helmReleaseName string) error {
+// labelVMAsAdopted marks the cross-namespace source VM so it drops out of the
+// reconcile loop and records which VMInstance replaced it. releaseNamespace is
+// the namespace the managed vm-instance release actually lives in (the adoption
+// target), NOT the source VM's own namespace: stamping the source VM's
+// (privileged) namespace here would invite a future vm-instance release created
+// in that privileged namespace to adopt and rewrite this VM.
+func (c *AdoptionController) labelVMAsAdopted(ctx context.Context, namespace, vmName, vmInstanceName, releaseNamespace, helmReleaseName string) error {
 	vmGVR := schema.GroupVersionResource{
 		Group:    "kubevirt.io",
 		Version:  "v1",
@@ -1200,7 +1206,7 @@ func (c *AdoptionController) labelVMAsAdopted(ctx context.Context, namespace, vm
 		annotations = make(map[string]string)
 	}
 	annotations["meta.helm.sh/release-name"] = helmReleaseName
-	annotations["meta.helm.sh/release-namespace"] = namespace
+	annotations["meta.helm.sh/release-namespace"] = releaseNamespace
 	vm.SetAnnotations(annotations)
 
 	_, err = c.dynamicClient.Resource(vmGVR).Namespace(namespace).Update(ctx, vm, metav1.UpdateOptions{})

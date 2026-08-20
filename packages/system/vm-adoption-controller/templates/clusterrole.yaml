@@ -13,10 +13,13 @@ rules:
   resources: ["plans", "migrations"]
   verbs: ["get", "list", "watch"]
 
-# Create/manage/delete VMInstances and VMDisks (imported disks become managed VMDisks)
+# Create VMInstances and VMDisks (imported disks become managed VMDisks). The
+# controller only ever gets and creates these; it never updates, patches or
+# deletes them (the sole Delete is on the Forklift VirtualMachine below), so
+# least privilege withholds those verbs.
 - apiGroups: ["apps.cozystack.io"]
   resources: ["vminstances", "vmdisks"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  verbs: ["get", "list", "watch", "create"]
 
 # Clone DataVolumes into the tenant (cross-namespace adoption)
 - apiGroups: ["cdi.kubevirt.io"]

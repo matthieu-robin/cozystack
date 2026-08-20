@@ -19,9 +19,6 @@ controller:
   # Namespace to watch (empty = all namespaces)
   watchNamespace: ""
 
-  # Enable adoption only for VMs with specific labels
-  adoptionEnabled: true
-
   # Prefix for created VMInstance names (empty = use original VM name)
   namePrefix: ""
 
