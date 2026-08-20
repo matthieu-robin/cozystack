@@ -16,38 +16,45 @@ var (
 	RoutesGlobal       string
 )
 
-// Observation state for logClientCert. The set is capped on purpose: with
-// tls.RequestClientCert the server accepts whatever certificate a caller
-// offers, so the issuer string is attacker-supplied. An unbounded set would
-// grow with every fabricated issuer and emit a log line for each — a memory
-// and log-volume amplifier reachable by anyone who can open a TCP connection.
-// Past the cap the webhook keeps serving and simply stops recording.
-const maxSeenClientIssuers = 32
+// Observation state for logClientCert.
+//
+// Deliberately NOT a set keyed on the issuer. With tls.RequestClientCert the
+// issuer string is supplied by the caller, so anything keyed on it is both
+// unbounded and forgeable: remembering every value grows without limit, and
+// remembering only the first N lets anyone who can reach the port fill those N
+// with fabricated issuers before the API server's first call and permanently
+// suppress the signal this exists to produce. Rate limiting cannot be starved
+// that way -- a burst costs the attacker at most the current interval, and the
+// next real handshake is logged in the one after it.
+//
+// The two outcomes are limited separately so a flood of one cannot hide the
+// other: "no certificate" and "certificate presented" answer different
+// questions, and it is the pair that decides whether enforcement is safe.
+const observationInterval = 30 * time.Second
 
-var (
-	clientIssuerMu     sync.Mutex
-	seenClientIssuers  = make(map[string]struct{}, maxSeenClientIssuers)
-	clientIssuerCapped bool
-)
+type observationLimiter struct {
+	mu   sync.Mutex
+	last time.Time
+	seen bool
+}
 
-// noteClientIssuer reports whether this issuer should be logged: true only when
-// it is new and there is still room to remember it.
-func noteClientIssuer(key string) bool {
-	clientIssuerMu.Lock()
-	defer clientIssuerMu.Unlock()
-	if _, seen := seenClientIssuers[key]; seen {
+// allow reports whether this observation should be logged: always the first
+// one, then at most one per observationInterval.
+func (l *observationLimiter) allow(now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.seen && now.Sub(l.last) < observationInterval {
 		return false
 	}
-	if len(seenClientIssuers) >= maxSeenClientIssuers {
-		if !clientIssuerCapped {
-			clientIssuerCapped = true
-			log.Printf("client certificate: %d distinct issuers observed, no longer recording new ones; if this cap was reached on a quiet cluster the issuers are probably fabricated", maxSeenClientIssuers)
-		}
-		return false
-	}
-	seenClientIssuers[key] = struct{}{}
+	l.seen = true
+	l.last = now
 	return true
 }
+
+var (
+	noCertObservations   observationLimiter
+	withCertObservations observationLimiter
+)
 
 // logClientCert reports, once per distinct issuer, whether the caller presented
 // a client certificate and who signed it.
@@ -67,17 +74,21 @@ func noteClientIssuer(key string) bool {
 // RequireAndVerifyClientCert on a cluster that sends nothing would fail every
 // admission call, and this webhook is registered failurePolicy: Fail — so pod
 // creation would stop cluster-wide. Observe first, enforce second.
-func logClientCert(next http.Handler) http.Handler {
+func logClientCert(enforcing bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := "<none>"
+		issuer := ""
 		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-			key = r.TLS.PeerCertificates[0].Issuer.String()
+			issuer = r.TLS.PeerCertificates[0].Issuer.String()
 		}
-		if noteClientIssuer(key) {
-			if key == "<none>" {
-				log.Printf("client certificate: none presented — client-ca-file enforcement is NOT yet safe on this cluster")
+		now := time.Now()
+		switch {
+		case issuer == "" && noCertObservations.allow(now):
+			log.Printf("client certificate: none presented by %s -- client-ca-file enforcement is NOT yet safe on this cluster", r.RemoteAddr)
+		case issuer != "" && withCertObservations.allow(now):
+			if enforcing {
+				log.Printf("client certificate: presented by %s, issuer %q -- verified against --client-ca-file during the handshake", r.RemoteAddr, issuer)
 			} else {
-				log.Printf("client certificate: presented, issuer %q (UNVERIFIED — nothing has checked this certificate, and any caller can claim any issuer). Confirm out of band that this is your API server's CA before pinning it with --client-ca-file", key)
+				log.Printf("client certificate: presented by %s, issuer %q (UNVERIFIED -- nothing has checked this certificate, and any caller can claim any issuer). Confirm out of band that this is your API server's CA before pinning it with --client-ca-file", r.RemoteAddr, issuer)
 			}
 		}
 		next.ServeHTTP(w, r)
@@ -133,7 +144,7 @@ func main() {
 	server := &http.Server{
 		Addr:              ":8443",
 		TLSConfig:         tlsConfig,
-		Handler:           logClientCert(mux),
+		Handler:           logClientCert(clientCAFile != "", mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,

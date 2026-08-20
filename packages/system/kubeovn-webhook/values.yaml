@@ -14,11 +14,16 @@ routes: ""
 #   "client certificate: presented, issuer ..."  → enforcement is possible
 #   "client certificate: none presented"         → it is not, yet
 #
-# Set it to the in-pod path of a CA bundle to switch to
-# RequireAndVerifyClientCert. Do this ONLY after the log confirms the API
-# server presents a certificate: this webhook is registered with
-# failurePolicy: Fail, so rejecting the API server stops pod creation
-# cluster-wide. The API server sends a certificate only when the cluster runs
-# with an AdmissionConfiguration that names a kubeConfigFile for this webhook.
+# Leave it empty. There is nothing to point it at yet: the pod mounts only its
+# own serving secret at /etc/webhook/certs, and the ca.crt in there is this
+# webhook's serving CA, not the API server's client CA. A path that does not
+# exist aborts startup; that ca.crt starts cleanly and then rejects every
+# API-server handshake. Either way this webhook is registered with
+# failurePolicy: Fail, so pod creation stops cluster-wide.
+#
+# Enabling enforcement is the second step, and it lands as one change: a volume
+# carrying the API server's client CA, a pool that reloads when that CA rotates,
+# and this key pointed at the mounted path. Until then the flag exists so the
+# observation above can run, not so it can be switched on.
 clientCAFile: ""
 image: ghcr.io/cozystack/cozystack/kubeovn-webhook:v1.6.0@sha256:593c324a38db59495497c5b68b90cad25dfe6753c73b7a287b3280e26f70a15f
