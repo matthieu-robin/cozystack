@@ -49,20 +49,20 @@ tests:
       - containsDocument:
           apiVersion: cluster.x-k8s.io/v1beta1
           kind: MachineDeployment
+          any: true
         not: true
-        documentIndex: -1
       - containsDocument:
           apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
           kind: KubevirtMachineTemplate
+          any: true
         not: true
-        documentIndex: -1
       - containsDocument:
           apiVersion: cluster.x-k8s.io/v1beta1
           kind: MachineHealthCheck
+          any: true
         not: true
-        documentIndex: -1
       - containsDocument:
           apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
           kind: TalosConfigTemplate
+          any: true
         not: true
-        documentIndex: -1
