@@ -121,18 +121,11 @@ func TestGetTargetNamespace(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := &AdoptionController{dynamicClient: fakeClient(newForkliftObj("Plan", tc.planNs, "p", "uid-1", tc.ann))}
-			if got := c.getTargetNamespace(context.Background(), tc.planNs, "p"); got != tc.want {
+			plan := newForkliftObj("Plan", tc.planNs, "p", "uid-1", tc.ann)
+			if got := getTargetNamespace(plan); got != tc.want {
 				t.Errorf("getTargetNamespace(%q) = %q, want %q", tc.planNs, got, tc.want)
 			}
 		})
-	}
-}
-
-func TestGetTargetNamespaceMissingPlanDefaultsLocal(t *testing.T) {
-	c := &AdoptionController{dynamicClient: fakeClient()}
-	if got := c.getTargetNamespace(context.Background(), "tenant-a", "missing"); got != "tenant-a" {
-		t.Errorf("missing plan: got %q, want tenant-a", got)
 	}
 }
 
@@ -222,13 +215,19 @@ func TestAdoptVMViaVMDisksRemovesSourceVMAfterCreate(t *testing.T) {
 }
 
 // A delete that failed on an earlier pass must be replayed, otherwise the source
-// VM is re-listed forever while the VMInstance already exists.
+// VM is re-listed forever while the VMInstance already exists. The pre-existing
+// VMInstance carries this import's identity annotations, so it is recognised as
+// our own earlier success.
 func TestAdoptVMViaVMDisksReplaysDeleteWhenVMInstanceExists(t *testing.T) {
 	existing := &unstructured.Unstructured{Object: map[string]interface{}{}}
 	existing.SetAPIVersion(vmInstanceGroup + "/" + vmInstanceVersion)
 	existing.SetKind(vmInstanceKind)
 	existing.SetNamespace("tenant-a")
 	existing.SetName("web")
+	existing.SetAnnotations(map[string]string{
+		"vm-import.cozystack.io/original-vm-name":      "web",
+		"vm-import.cozystack.io/original-vm-namespace": "tenant-a",
+	})
 
 	client := fakeClient(existing, newVM("tenant-a", "web", map[string]string{"plan": "uid-1"}))
 	c := &AdoptionController{dynamicClient: client, recorder: record.NewFakeRecorder(10)}
@@ -239,6 +238,30 @@ func TestAdoptVMViaVMDisksReplaysDeleteWhenVMInstanceExists(t *testing.T) {
 	}
 	if _, err := client.Resource(vmsGVR).Namespace("tenant-a").Get(context.Background(), "web", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Errorf("source VM still present, got err %v", err)
+	}
+}
+
+// A pre-existing VMInstance that only shares the target name but was not created
+// by this import (no matching identity annotations) must not be mistaken for an
+// earlier success: releasing the source VM against a stranger's VMInstance would
+// delete the imported VM and orphan its disks. Adoption fails and the source VM
+// is left intact for the operator to resolve the collision.
+func TestAdoptVMViaVMDisksRejectsForeignVMInstanceNameCollision(t *testing.T) {
+	foreign := &unstructured.Unstructured{Object: map[string]interface{}{}}
+	foreign.SetAPIVersion(vmInstanceGroup + "/" + vmInstanceVersion)
+	foreign.SetKind(vmInstanceKind)
+	foreign.SetNamespace("tenant-a")
+	foreign.SetName("web") // no vm-import identity annotations: an unrelated tenant VMInstance
+
+	client := fakeClient(foreign, newVM("tenant-a", "web", map[string]string{"plan": "uid-1"}))
+	c := &AdoptionController{dynamicClient: client, recorder: record.NewFakeRecorder(10)}
+
+	vm := kubevirtv1.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-a", Name: "web"}}
+	if err := c.adoptVMViaVMDisks(context.Background(), vm, "tenant-a", "web", nil, nil, nil, "u1.medium", "ubuntu", "Always", "import-1"); err == nil {
+		t.Fatal("adoptVMViaVMDisks succeeded against a foreign VMInstance, want a refusal")
+	}
+	if _, err := client.Resource(vmsGVR).Namespace("tenant-a").Get(context.Background(), "web", metav1.GetOptions{}); err != nil {
+		t.Errorf("source VM was released despite the name collision: %v", err)
 	}
 }
 

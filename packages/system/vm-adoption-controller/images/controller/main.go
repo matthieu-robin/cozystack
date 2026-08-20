@@ -517,17 +517,18 @@ const tenantNamespacePrefix = "tenant-"
 // confined to its own namespace: otherwise a tenant could name another tenant's
 // namespace and have this cluster-privileged controller create a VMInstance and
 // clone DataVolumes there (cross-tenant escalation).
-func (c *AdoptionController) getTargetNamespace(ctx context.Context, namespace, planName string) string {
-	gvr := schema.GroupVersionResource{Group: "forklift.konveyor.io", Version: "v1beta1", Resource: "plans"}
-	plan, err := c.dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, planName, metav1.GetOptions{})
-	if err != nil {
-		return namespace
-	}
+//
+// Reads the already-resolved Plan handed in by adoptVM rather than re-fetching
+// it: a second namespaced Get would add a failure mode where a transient error
+// silently defaulted the target to the Plan's own namespace, which on the
+// virt-v2v path collapses cross-namespace adoption into an in-place one and
+// deletes the source VM non-retryably.
+func getTargetNamespace(plan *unstructured.Unstructured) string {
 	ann := plan.GetAnnotations()
 	if ann == nil {
-		return namespace
+		return plan.GetNamespace()
 	}
-	return resolveTargetNamespace(namespace, planName, ann["vm-import.cozystack.io/target-namespace"])
+	return resolveTargetNamespace(plan.GetNamespace(), plan.GetName(), ann["vm-import.cozystack.io/target-namespace"])
 }
 
 // resolveTargetNamespace applies the cross-tenant guard: an empty or same-namespace
@@ -550,12 +551,10 @@ func resolveTargetNamespace(planNamespace, planName, requested string) string {
 // and `vm-import.cozystack.io/instance-profile` annotations. Empty strings mean
 // "not set" (the caller then falls back to the migrated VM's values or the
 // controller defaults).
-func (c *AdoptionController) getPlanPreset(ctx context.Context, namespace, planName string) (string, string) {
-	gvr := schema.GroupVersionResource{Group: "forklift.konveyor.io", Version: "v1beta1", Resource: "plans"}
-	plan, err := c.dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, planName, metav1.GetOptions{})
-	if err != nil {
-		return "", ""
-	}
+// Reads the already-resolved Plan rather than re-fetching it, so a transient
+// Get error can no longer silently drop the operator's chosen instanceType /
+// instanceProfile.
+func getPlanPreset(plan *unstructured.Unstructured) (string, string) {
 	ann := plan.GetAnnotations()
 	if ann == nil {
 		return "", ""
@@ -761,7 +760,7 @@ func (c *AdoptionController) adoptVM(ctx context.Context, vm kubevirtv1.VirtualM
 	if err := validateVMBelongsToPlan(plan, vm.Namespace, vm.Labels[forkliftVMLabel]); err != nil {
 		return fmt.Errorf("VM does not belong to Plan %s/%s: %w", planNamespace, planName, err)
 	}
-	presetInstanceType, presetPreference := c.getPlanPreset(ctx, planNamespace, planName)
+	presetInstanceType, presetPreference := getPlanPreset(plan)
 
 	// Extract running state — check runStrategy first (modern), then running (deprecated)
 	runStrategy := "Always"
@@ -962,7 +961,7 @@ func (c *AdoptionController) adoptVM(ctx context.Context, vm kubevirtv1.VirtualM
 	// source.pvc) so it becomes a first-class, dashboard-managed resource
 	// (`vm-disk-<name>`) instead of a raw Forklift populator PVC. The disks'
 	// dvName is rewritten to the VMDisk's DataVolume.
-	targetNamespace := c.getTargetNamespace(ctx, planNamespace, planName)
+	targetNamespace := getTargetNamespace(plan)
 	if err := c.wrapDisksAsVMDisks(ctx, vm.Namespace, targetNamespace, vmInstanceName, disks); err != nil {
 		return fmt.Errorf("failed to wrap imported disks as VMDisks: %w", err)
 	}
@@ -992,8 +991,21 @@ func (c *AdoptionController) adoptVMViaVMDisks(ctx context.Context, vm kubevirtv
 	vmInstanceGVR := schema.GroupVersionResource{Group: vmInstanceGroup, Version: vmInstanceVersion, Resource: "vminstances"}
 
 	// Idempotency: if the VMInstance already exists, the create succeeded on an
-	// earlier pass and only the source VM is left to release.
-	if _, err := c.dynamicClient.Resource(vmInstanceGVR).Namespace(targetNamespace).Get(ctx, vmInstanceName, metav1.GetOptions{}); err == nil {
+	// earlier pass and only the source VM is left to release. Verify it is the
+	// one THIS import created, not an unrelated VMInstance that merely shares the
+	// name (vmInstanceName == vm.Name). Releasing the source VM against a foreign
+	// VMInstance would delete the imported VM and orphan its disks while leaving
+	// the unrelated VMInstance untouched; the identity annotations checked here
+	// are written on create below.
+	if existing, err := c.dynamicClient.Resource(vmInstanceGVR).Namespace(targetNamespace).Get(ctx, vmInstanceName, metav1.GetOptions{}); err == nil {
+		ann := existing.GetAnnotations()
+		if ann["vm-import.cozystack.io/original-vm-name"] != vm.Name ||
+			ann["vm-import.cozystack.io/original-vm-namespace"] != vm.Namespace {
+			return fmt.Errorf("VMInstance %s/%s already exists but was not created by this import (its original-vm is %q/%q); refusing to release source VM %s/%s",
+				targetNamespace, vmInstanceName,
+				ann["vm-import.cozystack.io/original-vm-namespace"], ann["vm-import.cozystack.io/original-vm-name"],
+				vm.Namespace, vm.Name)
+		}
 		klog.Infof("VMInstance %s/%s already exists, ensuring source VM is handled", targetNamespace, vmInstanceName)
 		return c.releaseSourceVM(ctx, vm, targetNamespace, vmInstanceName, disks)
 	}
