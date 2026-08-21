@@ -1560,7 +1560,10 @@ STUB
   # occupies a core rather than reading a file, so a sample taken inside any of
   # those brackets inflates the numerator of a rate the pair reports as the
   # node-join window. Outside all three on both sides, it cannot.
-  wait_line=$(grep -n '^  if ! timeout 18m bash -c' "$lib" | head -n 1 | cut -d: -f1)
+  # Anchored on the wait's own body rather than on its shape: `timeout Nm bash -c`
+  # matches more than one line in the library, and picking the first would
+  # re-anchor this check the day another one is added above it.
+  wait_line=$(awk '/^  timeout [0-9]+m bash -c/ { cand = NR; next } cand && NR == cand + 1 && /get nodes --no-headers/ { print cand; exit } { cand = 0 }' "$lib")
   first=$(grep -n 'cozy_capture_runner_canary 1' "$lib" | head -n 1 | cut -d: -f1)
   green=$(awk -v w="$wait_line" 'NR > w && /cozy_capture_runner_canary 2/ { print NR; exit }' "$lib")
   tail_line=$(grep -n '^  versions=\$(kubectl --kubeconfig' "$lib" | head -n 1 | cut -d: -f1)
@@ -1672,7 +1675,10 @@ STUB
   # satisfied by the two lines swapped between the sites, and a shortfall
   # reported on the wrong side of the wait is worse than none: the pair exists to
   # say which side moved.
-  wait_line=$(grep -n '^  if ! timeout 18m bash -c' "$lib" | head -n 1 | cut -d: -f1)
+  # Anchored on the wait's own body rather than on its shape: `timeout Nm bash -c`
+  # matches more than one line in the library, and picking the first would
+  # re-anchor this check the day another one is added above it.
+  wait_line=$(awk '/^  timeout [0-9]+m bash -c/ { cand = NR; next } cand && NR == cand + 1 && /get nodes --no-headers/ { print cand; exit } { cand = 0 }' "$lib")
   before=$(grep -n 'produced no reading before the node-join wait' "$lib" | head -n 1 | cut -d: -f1)
   after=$(grep -n 'produced no reading after the node-join wait' "$lib" | head -n 1 | cut -d: -f1)
   tail_line=$(grep -n '^  versions=\$(kubectl --kubeconfig' "$lib" | head -n 1 | cut -d: -f1)
@@ -1952,7 +1958,7 @@ STUB
   # passing path and the one a triager opens last on the failing one. So all
   # three reporting sites put it in the job log, each naming where it was taken:
   # two outside the diagnostics block, on either side of the wait, and the third
-  # inside it, where sample 1's line is eighteen minutes above.
+  # inside it, where sample 1's line is a 29m node-join wait above.
   #
   # Counted through those clauses rather than through the shared prefix, for the
   # reason the shortfall guard above gives: three lines matched by one prefix
@@ -1977,7 +1983,10 @@ STUB
   # one line apiece is satisfied by the three of them swapped around.
   fail_fn=$(grep -n '^cozy_report_node_join_failure() {' "$lib" | head -n 1 | cut -d: -f1)
   test_fn=$(grep -n '^run_kubernetes_test() {' "$lib" | head -n 1 | cut -d: -f1)
-  wait_line=$(grep -n '^  if ! timeout 18m bash -c' "$lib" | head -n 1 | cut -d: -f1)
+  # Anchored on the wait's own body rather than on its shape: `timeout Nm bash -c`
+  # matches more than one line in the library, and picking the first would
+  # re-anchor this check the day another one is added above it.
+  wait_line=$(awk '/^  timeout [0-9]+m bash -c/ { cand = NR; next } cand && NR == cand + 1 && /get nodes --no-headers/ { print cand; exit } { cand = 0 }' "$lib")
   before=$(grep -n '» WARNING: the runner fixed-work canary did not read inside the range its own legend calls healthy before the node-join wait' "$lib" | head -n 1 | cut -d: -f1)
   after=$(grep -n '» WARNING: the runner fixed-work canary did not read inside the range its own legend calls healthy after the node-join wait' "$lib" | head -n 1 | cut -d: -f1)
   failing=$(grep -n '» WARNING: the runner fixed-work canary did not read inside the range its own legend calls healthy on the failing run' "$lib" | head -n 1 | cut -d: -f1)

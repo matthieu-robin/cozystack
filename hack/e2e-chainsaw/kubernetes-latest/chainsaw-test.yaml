@@ -18,15 +18,22 @@ spec:
   - name: tenant-kubernetes-latest-version
     try:
     - script:
-        # ~25m Kamaji bringup + worker join + LB/NFS/ouroboros assertions.
-        # The on-failure diagnostics phase carries its own 7m wall-clock budget
+        # ~25m Kamaji bringup + worker join + LB/NFS/ouroboros assertions on a
+        # passing run. The ceiling below is sized for the failing one instead,
+        # where the node-join wait spends its whole deadline and the diagnostics
+        # phase and the tenant snapshot still have to fit behind it.
+        # hack/run-kubernetes-node-join_test.bats holds that inequality: it reads
+        # the deadline off the wait and the operation off the constant that
+        # restates this `timeout:`.
+        #
+        # The on-failure diagnostics phase carries its own 8m wall-clock budget
         # (COZY_DIAG_PHASE_BUDGET in _lib/run-kubernetes.sh): once it is spent, the
         # collectors that have not started are declined out loud rather than
-        # attempted, so the in-process tenant crust-gather snapshot, the one the
-        # failing exit triggers and the largest artifact this path produces, still
-        # has its time. Why that budget and not another is derived beside it, from
-        # the op ceiling here minus the bringup and the snapshot; it is not repeated
-        # here, because a number kept in two places is a number that drifts.
+        # attempted, so the in-process tenant crust-gather snapshot, the one the exit
+        # off the node-join path triggers and the largest artifact this path produces,
+        # still has its time. Why that budget and not another is derived beside it and
+        # not repeated here, because a number kept in two places is a number that
+        # drifts.
         #
         # What this ceiling covers, in the order the phase spends it, cheapest first
         # so that a budget running out drops the collectors that cost minutes rather
@@ -66,7 +73,7 @@ spec:
         # diagnostic runs, and the pre-wait halves of the four readings above spend
         # inside that bringup rather than inside this phase. Those residuals are
         # tracked in cozystack/cozystack#3666.
-        timeout: 50m
+        timeout: 67m
         # Co-locate the tenant crust-gather snapshot (captured by
         # run-kubernetes.sh on failure) under the same snapshots/<test>/ dir as
         # the global .chainsaw.yaml catch's host snapshot.

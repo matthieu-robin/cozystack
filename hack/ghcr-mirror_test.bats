@@ -283,7 +283,7 @@ timeout() {
     stub_get_rc=0
     # The shape the real log has at diagnose time: the worker's kubelet pull happens
     # early, then the readinessProbe writes a /v2/ line every 5s for the rest of the
-    # run. After the 18m node-join budget that is 200+ probe lines stacked on top of
+    # run. After the 29m node-join budget that is 200+ probe lines stacked on top of
     # the one request worth finding, so a fixed tail window never reaches it.
     kubelet_line='10.244.1.92 - - [09/Aug/2026:01:00:00 +0000] "GET /v2/siderolabs/kubelet/manifests/v1.35.6 HTTP/1.1" 200 683'
     probe_lines=$(i=0; while [ "$i" -lt 300 ]; do echo '10.244.0.1 - - [09/Aug/2026:01:18:00 +0000] "GET /v2/ HTTP/1.1" 200 2'; i=$((i+1)); done)
@@ -927,8 +927,9 @@ timeout() {
     ttl=$(yq '.spec.ttlSecondsAfterFinished' "$work/job.yaml")
     dl=$(yq '.spec.activeDeadlineSeconds' "$work/job.yaml")
     # The only reader of this Job's outcome is the node-join failure block, which
-    # fires 18m into a suite that starts tens of minutes after install. A TTL that
-    # expires first deletes the evidence before the one moment it is wanted.
+    # fires at the 29m node-join deadline, in a suite that starts tens of minutes
+    # after install. A TTL that expires first deletes the evidence before the one
+    # moment it is wanted.
     [ "$ttl" -gt "$dl" ] || {
         echo "ttlSecondsAfterFinished ($ttl) does not outlast activeDeadlineSeconds ($dl)" >&2
         rm -rf "$work"; exit 1

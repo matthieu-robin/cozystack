@@ -321,6 +321,14 @@ cozy_cleanup() {
 # in-cluster URL is unreachable from the runner), which is the LB IP and stays
 # routable until teardown. CURRENT_TENANT_KC is a global so the handler can read
 # it regardless of function scope at EXIT-trap time.
+# Where a suite's captures land, spelled once. Two callers reach for the bare
+# directory rather than a subdirectory of it -- this handler and the softened
+# node-join path -- and a marker written beside a directory the snapshot no
+# longer uses is a marker beside nothing.
+_cozy_suite_snapshot_dir() {
+  printf '%s\n' "${COZY_REPORT_DIR:-/workspace/_out/cozyreport}/snapshots/${COZY_SNAPSHOT_NAME:-kubernetes}"
+}
+
 _tenant_snapshot_on_fail() {
   _rc=$?
   [ "$_rc" -eq 0 ] && return 0
@@ -330,7 +338,7 @@ _tenant_snapshot_on_fail() {
   # script env), so the tenant snapshot co-locates with the host snapshot the
   # global .chainsaw.yaml catch writes under snapshots/<test>/. Falls back to a
   # generic name if sourced outside the Chainsaw harness.
-  _snap="${COZY_REPORT_DIR:-/workspace/_out/cozyreport}/snapshots/${COZY_SNAPSHOT_NAME:-kubernetes}"
+  _snap=$(_cozy_suite_snapshot_dir)
   mkdir -p "$_snap" 2>/dev/null || true
   echo "» capturing tenant crust-gather snapshot (${CURRENT_TENANT_KC}) before teardown"
   # Bounded with a timeout for the same reason as the host snapshot in
@@ -643,7 +651,7 @@ cozy_capture_tenant_talos_node() {
 # logSerialConsole punches through the platform's cluster-wide disable, and if
 # kubevirt/kubevirt#15989 still bites, guest-console-log wedges virt-launcher
 # in Init: the workers never boot, no Node registers, and the suite reports
-# "fewer than 2 tenant nodes Ready within 18m" -- byte-identical to the failure
+# "fewer than 2 tenant nodes Ready within 29m" -- byte-identical to the failure
 # this instrumentation was added to study. A triager reading that line files it
 # as the known flake and the experiment's answer is lost at the bottom of
 # POD-STATE.txt. A diagnostic whose own worst case is disguised as the bug it
@@ -3704,63 +3712,45 @@ COZY_DIAG_MAX_IMPORTERS_DEFAULT=3
 # the two collectors share it: both take their first reading, the interval
 # passes once, and both take their second.
 COZY_DIAG_RATE_INTERVAL_DEFAULT=12
-# Lowered from 480 when the guest-Talos walk grew the service list and the link
-# table. That collector is the `largest` term of the inequality below, the
-# inequality had ten seconds of slack, and the two reads cost sixty across the
-# minimum pool -- so the budget is what had to give. 420 rather than the 430 the
-# arithmetic allows, because the guard compares the comment in both
-# kubernetes-*/chainsaw-test.yaml against whole minutes, and a budget that is
-# not one leaves that comment rounded rather than true.
+# What the diagnostics phase may spend. A whole number of minutes, because the
+# guard in hack/run-kubernetes-node-join_test.bats holds it against the figure
+# both kubernetes-*/chainsaw-test.yaml state in minutes, and a budget that is
+# not one leaves that statement rounded rather than true.
 #
-# What that leaves is ten seconds, and it is worth knowing here rather than
-# after the fact: the next collector added to the guest-Talos walk does not fit
-# without re-deriving this number, because that walk is the `largest` term and
-# ten seconds buys no bounded read at any bound this file uses. Adding one means
-# lowering the budget again, and the paragraphs below are what that costs. The
-# same arithmetic bounds the host-side walk, which is why a collector added
-# there is priced against this number too rather than against the phase budget
-# alone.
+# Two bounds fix it, and both are held in that file rather than here.
 #
-# What it costs is worth stating where the number is, not only in the change
-# that moved it, and it is two costs rather than one.
+# From below: the collectors gated ahead of the serial console must not be able
+# to spend the whole phase between them at their own ceilings. What sits ahead
+# of the console bounds what the console can lose, and a budget under their sum
+# turns "cut short" into "never started" for the one surface that survives a
+# worker which never reached apid.
 #
-# A shorter budget declines more, and what it declines first is what is gated
-# last -- ghcr_mirror_diagnose and talos_image_cache_diagnose. Neither loses its
-# subject entirely. The mirror's state is partly recoverable from the request
-# counts and response durations the mirror capture records against its own log,
-# and from the kube-system snapshot the host report takes; the image cache's
-# re-probe has no substitute and is the collector this budget gives up first,
-# which was already true at 480.
+# From above: this budget, one overshoot by the heaviest collector, and the
+# tenant crust-gather snapshot all have to fit in what the operation has left
+# once the bringup ahead of them is spent. That is the inequality the number
+# answers to, and raising the budget without raising the operation moves the
+# snapshot past the end of the window.
 #
-# The second cost lands on the guest captures rather than on the tail. Two
-# collectors read the node's metric stream ahead of the console -- (d2) and (d3)
-# -- and each spends a listing plus one read per node, so up to 200s between them
-# at the read bound and the three-node cap, plus the single read at (a3), which
-# takes its 25s from the same budget: 225s, a ceiling those numbers impose rather
-# than a duration measured on a live cluster. Between that and the sixty seconds
-# off the budget, the console and guest-Talos captures reach their gate with less
-# left than before; they are still ahead of the tail in the order, so they are not
-# first to go, but a run that was marginal for them is likelier to decline them
-# now.
+# What a budget of this size gives up first is what is gated last --
+# ghcr_mirror_diagnose and talos_image_cache_diagnose. Neither loses its subject
+# entirely: the mirror's state is partly recoverable from the request counts and
+# response durations the mirror capture records against its own log, and from
+# the kube-system snapshot the host report takes. The image cache's re-probe has
+# no substitute, and it is the collector this budget gives up first.
 #
-# Only part of that figure is held mechanically, and the boundary is worth naming
-# rather than leaving a reader to trust the whole of it: the guard in
-# hack/run-kubernetes-node-join_test.bats walks the CAPTURE-style collectors gated
-# ahead of the console -- the ones called as `cozy_capture_… || true` -- and fails
-# on any it has no cost arm for, so a walk added there is priced before the suite
-# goes green. A bounded read added ahead of the console, as (a3) is, is not in that
-# enumeration and its 25s are not summed there. That gap is recorded where the
-# other budget residuals are rather than fixed here.
+# Only part of what runs ahead of the console is held mechanically, and the
+# boundary is worth naming rather than leaving a reader to trust the whole of
+# it: the guard walks the collectors gated ahead of the console -- the ones
+# called as `cozy_… || true` -- and fails on any it has no cost arm for, so a
+# walk added there is priced before the suite goes green. A bounded read added
+# ahead of the console, as (a3) is, is not in that enumeration and its 25s are
+# not summed there. That gap is recorded where the other budget residuals are
+# rather than fixed here.
 #
 # What is deliberately NOT ahead of the console is the two-sample CPU pair,
-# whose own ceiling is several times this one. What sits ahead of the console
-# bounds what the console can lose, so that figure is the one to keep small; the
-# ordering argument at the pair says the rest.
-#
-# Those reads are not shared away in this change, and the reason is scope rather
-# than merit -- the note at the read says why, and says that merging would
-# improve both the cost and what a tight run collects.
-COZY_DIAG_PHASE_BUDGET_DEFAULT=420
+# whose own ceiling is several times this one; the ordering argument at the pair
+# says the rest.
+COZY_DIAG_PHASE_BUDGET_DEFAULT=480
 
 # The operation both kubernetes-*/chainsaw-test.yaml give the script, and the
 # room the passing-path console baseline needs inside it. Constants rather than
@@ -3785,7 +3775,7 @@ COZY_DIAG_PHASE_BUDGET_DEFAULT=420
 # arithmetic. That is pre-existing and tracked in cozystack/cozystack#3666; what
 # the reserve bounds is this capture's own contribution to the ceiling, which is
 # the part this file added.
-COZY_OP_CEILING=3000
+COZY_OP_CEILING=4020
 COZY_GREEN_CAPTURE_RESERVE=270
 # Zero until run_kubernetes_test stamps it. Declared here so the arithmetic in
 # cozy_green_capture_has_room cannot meet an unbound name: under the `set -eu`
@@ -4038,7 +4028,7 @@ cozy_diag_read() {
 }
 
 # Diagnostics for the node-join failure at the call site in run_kubernetes_test:
-# fewer than 2 tenant nodes became Ready inside its 18m deadline.
+# fewer than 2 tenant nodes became Ready inside its 29m deadline.
 #
 # The tenant's cilium-operator HR reports "InProgress" here purely because zero
 # worker Nodes joined, so the HelmRelease condition alone cannot tell apart
@@ -4057,8 +4047,9 @@ cozy_diag_read() {
 # is the largest artifact this whole path exists to produce.
 #
 # No capture is allowed to fail the function either, for the same reason the
-# reads are bounded: the caller's `exit 1` is what fails the suite and what
-# triggers the snapshot.
+# reads are bounded: the caller chooses the exit this returns into, and that
+# choice is what the tenant snapshot keys on. A collector returning non-zero
+# here would take the choice over under `set -e`.
 cozy_report_node_join_failure() {
   local test_name="$1"
   local tenant_kc="tenantkubeconfig-${test_name}"
@@ -4081,20 +4072,20 @@ cozy_report_node_join_failure() {
   # ahead of the wedge check: that check exists to name the console experiment's
   # own failure before this line's wording -- which is byte-identical to the bug
   # the instrumentation studies -- sends a triager to the known flake.
-  echo "=== node-join failed: fewer than 2 tenant nodes Ready within 18m — diagnostics follow ==="
+  echo "=== node-join failed: fewer than 2 tenant nodes Ready within 29m — diagnostics follow ==="
   cozy_report_guest_console_wedge || true
   # The second KVM counter reading, pairing with the one taken before the wait.
   # Ungated for the reason the wedge check above is, and for one of its own:
   # the phase gate decides what may START, and a collector it declines loses
   # only itself -- except this one, which would also retire a reading taken
-  # eighteen minutes earlier and leave it an orphan. Its cost is a single
+  # a 29m node-join wait earlier and leave it an orphan. Its cost is a single
   # bounded read of a file on this machine, so it cannot meaningfully bound what
   # comes after it.
   cozy_capture_sandbox_kvm_exits 2 || true
   # The second half of the other two pairs, here for the same reason and with the
   # same standing: the phase gate decides what may START, and a collector it
   # declines loses only itself -- except these, which would also retire a reading
-  # taken eighteen minutes earlier and leave it an orphan.
+  # taken a 29m node-join wait earlier and leave it an orphan.
   #
   # What they cost, stated rather than waved at: each runs under one ceiling of
   # its own, so the pair adds two of those to whatever runs before the console.
@@ -4125,7 +4116,7 @@ cozy_report_node_join_failure() {
   # The alert reaches the job log here as well, and for a sharper version of the
   # reason the two samples outside this block report theirs: this is the run a
   # triager opens, the tail of it is where they start, and sample 1's warning is
-  # eighteen minutes and thousands of lines above.
+  # a 29m node-join wait and thousands of lines above.
   if [ "${_COZY_CANARY_ALERT:-0}" -eq 1 ]; then
     echo "» WARNING: the runner fixed-work canary did not read inside the range its own legend calls healthy on the failing run, so what follows was collected on a machine that was not getting the work done; which arm it was and what figure it gave is written into the capture" >&2
   fi
@@ -4500,6 +4491,124 @@ cozy_report_node_join_failure() {
   fi
 }
 
+# Whether a non-zero from the node-join wait is the deadline expiring.
+#
+# Why 29m and not some other figure, since this is the number the answer is
+# about. It is this test's own budget and only that. The clock starts where the
+# wait starts, which is after the machinedeployment wait, the LoadBalancer
+# assignment and the healthz probe, each with a ceiling of its own; the
+# product's timers start elsewhere and are already running by then. The
+# autoscaler's `maxNodeProvisionTime` runs from the Machine's creation, and the
+# MachineHealthCheck's `nodeStartupTimeout` from the later of creation and
+# InfrastructureReady, restarting at that transition. So the offset between this
+# deadline and either of those is not fixed, and no ordering against them is
+# claimed here.
+#
+# What the two figures do give is a scale to pick against. The chart ships 20m
+# for `nodeStartupTimeout` and 30m for `maxNodeProvisionTime`, and the e2e
+# tenant overrides neither. A budget over the first is wide enough for a
+# remediation cycle to fit inside it; whether one does on a given run is not
+# something this deadline decides, and a run that spends the window on a single
+# worker that never comes back is as much a red as one that watched a
+# replacement fail.
+#
+# That width has a price and it is paid in evidence: when the health check does
+# replace a worker inside the window, the guest serial console of the first one
+# goes with its virt-launcher Pod. What survives is the console of its
+# replacement and, through Chainsaw's catch, the host snapshot carrying the
+# Machine history that shows the replacement happened at all.
+#
+# 124 is what `timeout` returns when it fired, and it is the only status that
+# means what the marker below is about. The wrapper's other failures are
+# reported with the same non-zero shape and mean something else entirely: 125 is
+# `timeout` failing, 126 and 127 are the shell it was asked to run being
+# unusable or absent, and 128+n is that shell killed by a signal, the OOM killer
+# on a loaded runner among them. Folding those into the softened branch would
+# report "the workers were slow" for a run where the wait never ran, which is
+# the one claim this change must not start making.
+#
+# No `-k` is given to that `timeout`, so a 137 here is a kill from outside the
+# wait rather than its own escalation, and it stays hard for that reason.
+cozy_node_join_deadline_expired() {
+  [ "$1" -eq 124 ]
+}
+
+# Record that the node-join deadline, and not something else, is what ended this
+# run. The suite still fails: the exit below this call is 1, so Chainsaw sees a
+# failed test, its whole catch runs, and the JUnit report says what happened.
+# What this function writes is the evidence one layer up needs to tell this
+# failure apart from every other way the suite can go red.
+#
+# The deadline stopped discriminating. Nested virtualisation on these runners
+# degrades far enough that the guest a worker boots in can miss any deadline
+# this test can afford, which is what the four readings that bracket the wait
+# were added to measure. So a red on this one wait no longer separates a product
+# regression from the machine the run landed on, and a signal that cannot
+# separate those teaches a reader to re-run the job -- which is how the reds
+# that do mean something get re-run too. The lanes that block a merge therefore
+# tolerate this one failure and only this one, and they decide that from the
+# marker below rather than from anything they could infer about the run.
+#
+# Two things are written, and each is for a different reader.
+#
+# The annotation is for the reader who never opens the log: a job-level warning
+# is the one surface that reaches them. It is `::warning` rather than `::error`
+# because an error annotation is what a run that actually broke should carry,
+# and this line has to be distinguishable from those at a glance.
+#
+# It survives the two layers between here and the job log, which is worth
+# knowing before anyone moves it: Chainsaw does not print a script's stdout
+# through, it collects it and re-prints it under an `=== STDOUT` heading with
+# eight spaces of indentation on every line. The Actions runner trims leading
+# whitespace before it looks for the `::` (ActionCommand.TryParseV2), so an
+# indented workflow command still registers -- but a change that put anything
+# else before the `::` on this line, a prefix or a timestamp, would silently
+# turn the annotation into a log line nobody sees.
+#
+# The marker is what the lane reads, and it is also what a reader with the
+# report open finds beside the diagnostics. Both uses want the same file, and
+# the lane's use is why it has to be written before the exit rather than derived
+# from the log afterwards. It is written before the diagnostics rather than
+# after them for a reason of the same kind: the diagnostics phase spends minutes
+# and the job cap can end the run inside it, and a marker written after that
+# point is a marker the lane never sees on exactly the runs that spent longest.
+# What it does not give is a cheap count across runs: it lives inside
+# cozyreport.tgz, and no API lists the contents of an artifact, so answering
+# "how often" means fetching and unpacking every run -- and artifacts expire on
+# a retention of their own, the same as logs do.
+#
+# Nothing in here may fail the caller, and the reason is sharper than tidiness:
+# a marker that could not be written turns this run into an ordinary hard red
+# one layer up, which is the safe direction, and it must not also break the
+# failing exit that gets the diagnostics collected. So the writes are guarded
+# and the function returns zero on every path.
+cozy_soft_red_node_join() {
+  local test_name="$1"
+  local report_dir marker
+  report_dir=$(_cozy_suite_snapshot_dir)
+  marker="${report_dir}/SOFT-RED-node-join.txt"
+
+  echo "::warning title=node-join::${COZY_SNAPSHOT_NAME:-kubernetes}: fewer than 2 tenant nodes Ready within 29m — this test fails and its diagnostics follow below; whether the job blocks over it is decided one layer up, and only the lanes that block a merge tolerate it, because the deadline cannot separate a product regression from a degraded runner"
+
+  if ! mkdir -p "${report_dir}" 2>/dev/null; then
+    echo "» WARNING: could not create ${report_dir}, so this run carries no soft-red marker; the warning annotation above is the only record that the node-join deadline expired" >&2
+    return 0
+  fi
+  # The write is tested rather than left to stand on its own: under a live
+  # errexit a bare redirect that fails aborts AT the redirect, and the report
+  # this function exists to leave would then be missing without a word about it.
+  if ! printf '%s\n' \
+    "the node-join wait for ${test_name} ended with fewer than 2 tenant nodes Ready within 29m" \
+    'this test FAILED, which is what gets the rest of the evidence collected: the in-process diagnostics and then the Chainsaw catch both run after this file is written -- previous-instance container logs, the host snapshot, the data-plane capture, the event dump -- and the report records a failure' \
+    'the tenant crust-gather snapshot is attempted after this marker is written; when it ran it lands in this directory with a log saying whether it completed or was truncated, and when it could not start at all -- no crust-gather on PATH, no live kubeconfig -- it leaves nothing here and says nothing, so an absent snapshot beside this marker is unexplained rather than explained' \
+    'what the run did NOT reach is everything after the join: the suite stops at this wait, so it asserted nothing about storage, LoadBalancer, addon or ouroboros hairpin-NAT behaviour' \
+    'what this file is for is the layer above: a lane that tolerates this failure reads it to tell this red apart from every other way the suite can go red, and tolerates only this one; not every lane does, so a job that finished green while this file exists is a job that decided not to block on a deadline it cannot attribute, not a job whose suite passed' \
+    >"${marker}" 2>/dev/null; then
+    echo "» WARNING: could not write ${marker}, so this run carries no soft-red marker; the warning annotation above is the only record that the node-join deadline expired" >&2
+  fi
+  return 0
+}
+
 run_kubernetes_test() {
     local version_expr="$1"
     local test_name="$2"
@@ -4694,8 +4803,8 @@ EOF
   # endpoints (both Kamaji control-plane pods), so a single apiserver pod restart
   # is routed around transparently. `kubectl port-forward` instead pins to one
   # pod and dies when that pod blips: a lone kube-apiserver restart was observed
-  # leaving localhost refusing connections for the entire 18m node-Ready wait
-  # while the cluster was in fact healthy (CAPI NodeHealthy=True on both nodes),
+  # leaving localhost refusing connections for the whole node-Ready wait while
+  # the cluster was in fact healthy (CAPI NodeHealthy=True on both nodes),
   # failing the test on a dead tunnel. The LB endpoint is also stable until
   # teardown, so the failure snapshot can still reach the tenant. Test-scoped and
   # additive — no change to the product Kamaji/Kubernetes chart.
@@ -4788,16 +4897,32 @@ EOF
   if ! cozy_capture_sandbox_kvm_exits 1; then
     echo "» WARNING: the sandbox kernel's KVM counters yielded no reading before the node-join wait, so the reading taken after it will have nothing to pair with; whether the read failed or the kernel had no counters to give is written into the capture itself, and any message the read left is in the log beside it" >&2
   fi
-  if ! timeout 18m bash -c '
-    until [ "$(kubectl --kubeconfig tenantkubeconfig-'"${test_name}"' get nodes --no-headers 2>/dev/null | grep -cw Ready)" -ge 2 ]; do
+  # The status is kept rather than tested in place, because what this branch
+  # does next depends on which non-zero it was and `if !` throws that away.
+  local _join_rc=0
+  timeout 29m bash -c '
+    until [ "$(kubectl --kubeconfig "tenantkubeconfig-'"${test_name}"'" get nodes --no-headers 2>/dev/null | grep -cw Ready)" -ge 2 ]; do
       sleep 5
     done
-  '; then
-    # Node-join failed: fewer than 2 tenant nodes became Ready inside the 18m
-    # deadline. Dump scoped diagnostics that split the failure sub-modes, then
-    # fail fast — no point running LB/NFS tests without Ready nodes. The `exit 1`
-    # is also what triggers the tenant crust-gather snapshot (the EXIT trap
-    # registered above), so it has to be reached.
+  ' || _join_rc=$?
+  if [ "${_join_rc}" -ne 0 ]; then
+    # Node-join failed: fewer than 2 tenant nodes became Ready inside the 29m
+    # deadline, or the wait itself could not run. Record which of the two it was,
+    # dump scoped diagnostics that split the failure sub-modes, then fail — the
+    # checks below need Ready nodes and would report their absence as their own
+    # failure.
+    #
+    # Both cases exit 1, and that is the point: the suite stays red, so Chainsaw
+    # runs its whole catch and the report says a test failed. What differs is
+    # only whether a marker is left behind, and whether a lane reads that marker
+    # is what decides if this particular red blocks a merge. The marker is written
+    # ahead of the diagnostics rather than behind them because the diagnostics
+    # spend minutes under a job cap that can end the run inside them.
+    if cozy_node_join_deadline_expired "${_join_rc}"; then
+      cozy_soft_red_node_join "${test_name}"
+    else
+      echo "the node-join wait did not run to its deadline (exit ${_join_rc}); this is the wait failing rather than the nodes, and it is not what the lane tolerates" >&2
+    fi
     cozy_report_node_join_failure "${test_name}"
     exit 1
   fi

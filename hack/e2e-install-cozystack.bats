@@ -96,9 +96,14 @@
   # Start filling the cache now, not when the first tenant worker asks for it.
   # An empty pull-through cache makes the first pull a live fetch from ghcr.io, and
   # that leg is what the tenant worker cannot afford: measured at 40-165 KB/s for a
-  # 61 MiB image against an 18m node-Ready budget, with some blob streams dying
-  # mid-transfer. The kubernetes suites start tens of
-  # minutes after this step, so a background Job has time to finish.
+  # 61 MiB image, with some blob streams dying mid-transfer. At the low end that
+  # single pull runs about twenty-six minutes, and it is one leg of a join that
+  # also has to boot Talos and get a CNI onto the node inside the same node-Ready
+  # budget. Deliberately not stated as a fraction of that budget: the figure is a
+  # measured transfer rate and stays true whatever the deadline is set to, while a
+  # ratio would have to be re-derived every time the deadline moves and would read
+  # as comfortable the moment it did. The kubernetes suites start tens of minutes
+  # after this step, so a background Job has time to finish.
   #
   # What is guaranteed: a warm-up that fails, times out or never starts does not
   # fail this step, and the suites behave as they did before it existed.

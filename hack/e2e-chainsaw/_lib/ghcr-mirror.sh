@@ -146,9 +146,9 @@ spec:
   backoffLimit: 3
   activeDeadlineSeconds: 3600
   # Outlives the suites on purpose. The node-join failure block is the only reader
-  # of this Job's outcome and it fires 18m into a suite that starts tens of minutes
-  # after install; a shorter TTL deletes the Job and its log before the one moment
-  # anybody asks whether the warm-up worked.
+  # of this Job's outcome and it fires at the 29m node-join deadline, in a suite
+  # that starts tens of minutes after install; a shorter TTL deletes the Job and
+  # its log before the one moment anybody asks whether the warm-up worked.
   ttlSecondsAfterFinished: 14400
   template:
     metadata:
@@ -474,7 +474,7 @@ resolve_ghcr_mirror_endpoint() {
     # the Deployment's own condition says instead of reading the watch's exit code
     # as the answer.
     #
-    # 2m, not longer: the wait is serial with the rest of the 50m e2e step, whose
+    # 2m, not longer: the wait is serial with the rest of the 67m e2e step, whose
     # budget inventory has to stay above the sum of its legs, and spending more here
     # eats the margin the failure-path diagnostics need in order to be collected at
     # all. It is already generous -- the Deployment pulls one small digest-pinned
@@ -613,10 +613,10 @@ ghcr_mirror_diagnose() {
     #
     # Filter the whole log rather than tailing it. The readinessProbe requests /v2/
     # every 5s and registry:2 writes an access line per request, so ~12 lines a
-    # minute pile up after the worker's pull; by the time this runs -- past an 18m
-    # node-join budget -- that is 200+ probe lines on top of the one request worth
-    # finding, and any fixed tail window reports "no kubelet pull" for a mirror that
-    # served it. --tail=-1 is explicit because kubectl defaults a label-selected
+    # minute pile up after the worker's pull; by the time this runs, past a
+    # 29m node-join budget, that is 200+ probe lines on top of the one request
+    # worth finding, and any fixed tail window reports "no kubelet pull" for a
+    # mirror that served it. --tail=-1 is explicit because kubectl defaults a label-selected
     # read to the last 10 lines, not to the whole log. It is the wall clock, not the
     # line count, that bounds this read: --tail=-1 stays, timeout caps the time.
     echo "--- did a worker pull ${GHCR_WARM_REPO} through the mirror? ---"
@@ -677,9 +677,10 @@ ghcr_mirror_diagnose() {
       # 131072 fails with E2BIG. The readiness probe writes an access line every 5s,
       # so this log passes that after roughly twenty minutes of mirror uptime -- which
       # is always true here, since the mirror is created during install and this runs
-      # 18m into a suite that starts long after it. As an argument the read would have
-      # failed on every real run and succeeded only against a fixture small enough to
-      # fit, which is the one case the tests exercise.
+      # at the 29m node-join deadline, in a suite that starts long after it. As an
+      # argument the read would have failed on every real run and succeeded only
+      # against a fixture small enough to fit, which is the one case the tests
+      # exercise.
       echo "--- how long did the mirror take to answer the worker? ---"
       durations=$(printf '%s\n' "$log" | grep -F "/v2/${GHCR_WARM_REPO}" \
         | grep -F 'http.response.duration' \

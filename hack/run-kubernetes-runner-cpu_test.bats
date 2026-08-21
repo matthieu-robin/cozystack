@@ -862,7 +862,10 @@ STUB
   # a second reading placed after the happy-path tail prices ten to fifteen
   # minutes of storage and LoadBalancer work while the capture's own legend says
   # it priced the join.
-  wait_line=$(grep -n '^  if ! timeout 18m bash -c' "$lib" | head -n 1 | cut -d: -f1)
+  # Anchored on the wait's own body rather than on its shape: `timeout Nm bash -c`
+  # matches more than one line in the library, and picking the first would
+  # re-anchor this check the day another one is added above it.
+  wait_line=$(awk '/^  timeout [0-9]+m bash -c/ { cand = NR; next } cand && NR == cand + 1 && /get nodes --no-headers/ { print cand; exit } { cand = 0 }' "$lib")
   tail_line=$(grep -n '^  versions=\$(kubectl --kubeconfig' "$lib" | head -n 1 | cut -d: -f1)
   node_table=$(grep -n "cozy_diag_read 'tenant node table'" "$lib" | head -n 1 | cut -d: -f1)
   for v in wait_line tail_line node_table; do
@@ -923,7 +926,10 @@ STUB
   # reading must therefore be the LAST of the three before the wait, and its
   # second the FIRST after it -- on both paths. The other two legends name the
   # sibling readings inside their intervals, so their order is free.
-  wait_line=$(grep -n '^  if ! timeout 18m bash -c' "$lib" | head -n 1 | cut -d: -f1)
+  # Anchored on the wait's own body rather than on its shape: `timeout Nm bash -c`
+  # matches more than one line in the library, and picking the first would
+  # re-anchor this check the day another one is added above it.
+  wait_line=$(awk '/^  timeout [0-9]+m bash -c/ { cand = NR; next } cand && NR == cand + 1 && /get nodes --no-headers/ { print cand; exit } { cand = 0 }' "$lib")
   [ -n "$wait_line" ] || { echo "FAIL: could not find the node-join wait"; false; }
   last_before=$(awk -v w="$wait_line" 'NR < w && /^  if ! cozy_capture_(sandbox_kvm_exits|runner_kernel_cpu_time|sandbox_qemu_thread_cpu) 1; then/ { l = $0 } END { print l }' "$lib")
   case "$last_before" in

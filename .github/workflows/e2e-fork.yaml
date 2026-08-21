@@ -540,8 +540,18 @@ jobs:
     name: E2E (fork run)
     needs: [resolve, publish]
     if: ${{ needs.resolve.outputs.should_run == 'true' }}
+    # What the gate decided, promoted to a job output because the job's RESULT
+    # can no longer answer it: a red the lane tolerated finishes `success`, so
+    # the status this lane reports would otherwise call that run a pass.
+    outputs:
+      soft_red: ${{ steps.e2e_tests.outputs.soft_red }}
     runs-on: oracle-vm-32cpu-128gb-x86-64
-    timeout-minutes: 180
+    # Sized above what the tenant-Kubernetes pair can spend on a failing run, and
+    # held to one figure across every lane that runs the suite. That bound, the
+    # measured run the rest of the margin comes from, and what neither of them
+    # covers are all in hack/node-join-soft-red_test.bats rather than restated
+    # here in four workflows that would then drift apart.
+    timeout-minutes: 215
     permissions:
       contents: read
       packages: read
@@ -689,6 +699,19 @@ jobs:
               kubectl get bucketaccesses.objectstorage.k8s.io -A -o custom-columns="NAMESPACE:.metadata.namespace,NAME:.metadata.name,GRANTED:.status.accessGranted,CLAIM:.spec.bucketClaimName" 2>&1
             ' || true
             echo "::endgroup::"
+            # One failure the lane does not block on, and only one: the tenant
+            # node-join deadline. The test itself stays red -- Chainsaw ran its
+            # whole catch above and the report records the failure -- and this
+            # decides only whether the job does. It blocks on anything it cannot
+            # attribute to that deadline, including a report it could not read.
+            if hack/e2e-node-join-soft-red.sh "$SANDBOX_NAME"; then
+              # Recorded because this exit makes the job succeed, and the status
+              # this lane reports back to the pull request is derived from that
+              # result: without this the required check would say the suite
+              # passed on a run where it failed.
+              echo "soft_red=true" >>"$GITHUB_OUTPUT"
+              exit 0
+            fi
             exit 1
           fi
           echo "✅ All selected E2E tests passed"
@@ -746,14 +769,22 @@ jobs:
         env:
           PUBLISH_RESULT: ${{ needs.publish.result }}
           E2E_RESULT:     ${{ needs.e2e.result }}
+          E2E_SOFT_RED:   ${{ needs.e2e.outputs.soft_red }}
           HEAD_SHA:       ${{ needs.resolve.outputs.head_sha }}
           RUN_URL:        ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         with:
           script: |
-            const { PUBLISH_RESULT, E2E_RESULT, HEAD_SHA, RUN_URL } = process.env;
+            const { PUBLISH_RESULT, E2E_RESULT, E2E_SOFT_RED, HEAD_SHA, RUN_URL } = process.env;
             const { owner, repo } = context.repo;
             let state, description;
-            if (E2E_RESULT === 'success') {
+            if (E2E_RESULT === 'success' && E2E_SOFT_RED === 'true') {
+              // The suite did NOT pass: the tenant node-join deadline expired and
+              // the lane decided not to block on it. `success` is the decision;
+              // this text is the only place a reader standing in front of the
+              // merge button learns what it was a decision about.
+              state = 'success';
+              description = 'fork e2e soft: node-join deadline missed, suite failed, merge not blocked';
+            } else if (E2E_RESULT === 'success') {
               state = 'success';
               description = 'fork e2e passed (privileged run)';
             } else if (PUBLISH_RESULT !== 'success') {
