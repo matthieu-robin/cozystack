@@ -251,9 +251,92 @@ stage() {
   {
     printf 'Architecture:                       x86_64\n'
     printf 'Model name:                         AMD EPYC 9J14 96-Core Processor\n'
+    printf 'Flags:                              fpu vme de pse tsc msr svm npt nrip_save vgif umip pku\n'
   } >"$1/lscpu.out"
   printf '32\n' >"$1/nproc.out"
   printf '6.8.0-1021-oracle\n' >"$1/uname.out"
+}
+
+# ---------------------------------------------------------------------------
+# The SVM sub-feature reader, driven directly.
+#
+# These exist because the flag this reader was added for, vgif, is the one field
+# in the record that decides whether a nested guest runs at hardware speed or
+# traps to the layer below on every world switch, and it is read out of a flag
+# list where a whole-word match is the only thing standing between `svm` and
+# `svm_lock`.
+# ---------------------------------------------------------------------------
+
+@test "the svm reader keeps the sub-features an AMD guest was given" {
+  tmp=$(mktemp -d)
+  printf 'Model name:  AMD EPYC 7J13 64-Core Processor\n' >"$tmp/lscpu"
+  printf 'Flags:       fpu de tsc svm cr8_legacy npt nrip_save vgif umip pku\n' >>"$tmp/lscpu"
+
+  out=$(runner_svm_features <"$tmp/lscpu")
+
+  # vgif is the whole reason for this line: present here, and its absence on an
+  # otherwise identical host is the only difference measured between a runner
+  # whose nested guests boot and one whose do not.
+  [ "$out" = "svm npt nrip_save vgif" ] || {
+    echo "expected 'svm npt nrip_save vgif', got '$out'" >&2
+    return 1
+  }
+}
+
+@test "the svm reader reports the same host without vgif as lacking it" {
+  tmp=$(mktemp -d)
+  printf 'Flags:       fpu de tsc svm cr8_legacy npt nrip_save umip pku\n' >"$tmp/lscpu"
+
+  out=$(runner_svm_features <"$tmp/lscpu")
+
+  [ "$out" = "svm npt nrip_save" ] || {
+    echo "expected 'svm npt nrip_save', got '$out'" >&2
+    return 1
+  }
+}
+
+@test "the svm reader says nothing about an Intel host, whose vnmi is not SVM" {
+  tmp=$(mktemp -d)
+  # vnmi is a flag name under VMX as well as SVM. Ungated, this reader would
+  # print one SVM sub-feature for a machine that has no SVM, which is not a
+  # shorter answer but a wrong one.
+  printf 'Flags:       fpu vme de pse tsc msr vmx ept vpid vnmi\n' >"$tmp/lscpu"
+
+  out=$(runner_svm_features <"$tmp/lscpu")
+
+  [ -z "$out" ] || {
+    echo "expected no output for an Intel flag list, got '$out'" >&2
+    return 1
+  }
+}
+
+@test "the svm reader does not take svm from svm_lock alone" {
+  tmp=$(mktemp -d)
+  # A whole-word match is what keeps this honest: svm_lock is a sub-feature name
+  # in its own right and its presence does not mean SVM is exposed.
+  printf 'Flags:       fpu de tsc svm_lock npt umip\n' >"$tmp/lscpu"
+
+  out=$(runner_svm_features <"$tmp/lscpu")
+
+  [ -z "$out" ] || {
+    echo "expected no output when only svm_lock is present, got '$out'" >&2
+    return 1
+  }
+}
+
+@test "the svm reader reads the first Flags line only" {
+  tmp=$(mktemp -d)
+  # lscpu prints one Flags line, but a caller handing this a concatenated table
+  # would otherwise get two machines' features merged into one answer.
+  printf 'Flags:       fpu svm npt vgif\n' >"$tmp/lscpu"
+  printf 'Flags:       fpu svm npt avic\n' >>"$tmp/lscpu"
+
+  out=$(runner_svm_features <"$tmp/lscpu")
+
+  [ "$out" = "svm npt vgif" ] || {
+    echo "expected only the first Flags line, got '$out'" >&2
+    return 1
+  }
 }
 
 # ---------------------------------------------------------------------------
