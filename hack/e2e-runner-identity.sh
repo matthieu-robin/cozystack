@@ -461,6 +461,57 @@ runner_cpu_model() {
   sed -n 's/^Model name:[[:space:]]*//p' | sed -n '1p'
 }
 
+# runner_svm_features: the AMD SVM sub-features this VM's virtual CPU was given.
+#
+# Same shape as the model reader above and for the same reason: it transforms an
+# `lscpu` table handed to it on stdin, so the one bounded read stays at the one
+# call site that owns the ceiling.
+#
+# WHY THIS LINE IS WORTH A PLACE IN THE RECORD
+#
+# `svm` says a guest may run a hypervisor. The sub-features say what that costs.
+# The one that has mattered here is `vgif`: without it, a guest that is itself
+# running a hypervisor traps to the layer below on every CLGI and STGI, and those
+# bracket every world switch it performs. A guest that runs no hypervisor never
+# executes either instruction, so this is invisible until something nests two
+# deep -- which is exactly this suite, where the sandbox Talos nodes host the
+# tenant KubeVirt VMs. It explains a shape of failure no resource counter can:
+# the cycles are spent handling exits rather than running the guest, so the
+# runner reads mostly idle with near-zero steal while its nested guests freeze.
+#
+# Measured across the archived reports, no run whose kernel did not report
+# Virtual GIF has ever passed a tenant-Kubernetes suite, and the two hosts
+# compared directly differed in this one flag and nothing else -- same shape,
+# same processor model, same kernel. On a flex shape filled from shared capacity
+# that is not a property of the lane, so it belongs beside the shape and the
+# processor rather than in a reader's memory of a run that has since been
+# recycled.
+#
+# The whole SVM list is kept rather than that one flag, because which features a
+# host exposes has turned out to vary between hosts of the same shape, and a
+# record that answered only the question already asked would have to be extended
+# by whoever asks the next one.
+#
+# Names are the kernel's own from this leaf, matched whole so `svm` cannot be
+# taken from `svm_lock`; `-E` and `-x` are both POSIX. `grep` finding nothing is
+# a status this reads as an answer, so no branch here -- an Intel host, or a
+# guest given no sub-features, prints an empty list and the caller says so.
+runner_svm_features() {
+  _rsf_flags=$(sed -n 's/^Flags:[[:space:]]*//p' | sed -n '1p')
+  # Gated on `svm` itself, and not only for tidiness: `vnmi` is a flag name on
+  # Intel too, where it belongs to VMX, so an ungated list prints one SVM
+  # sub-feature on a machine that has no SVM at all. Sub-features of an absent
+  # feature are not a shorter answer, they are a wrong one. Padded case rather
+  # than a grep so `svm` cannot be taken from `svm_lock`.
+  case " $_rsf_flags " in
+    *' svm '*) ;;
+    *) return 0 ;;
+  esac
+  printf '%s\n' "$_rsf_flags" | tr ' ' '\n' |
+    grep -xE 'svm|svm_lock|npt|lbrv|nrip_save|tsc_scale|vmcb_clean|flushbyasid|decodeassists|pausefilter|pfthreshold|avic|x2avic|v_vmsave_vmload|vgif|vnmi|v_spec_ctrl|svme_addr_chk' |
+    tr '\n' ' ' | sed 's/[[:space:]]*$//'
+}
+
 if [ -n "${E2E_RUNNER_IDENTITY_LIB:-}" ]; then
   return 0 2>/dev/null
 fi
@@ -646,8 +697,20 @@ if runner_read lscpu; then
   else
     add 'cpu model: unavailable (lscpu answered, and no Model name line was taken from its table)'
   fi
+  # Out of the same read as the model, so the two lines describe one reading of
+  # one machine rather than two that a slow first read could have separated.
+  svm_features=$(printf '%s\n' "$RUNNER_READ_OUT" | runner_svm_features)
+  if [ -n "$svm_features" ]; then
+    add "svm features: $svm_features${RUNNER_READ_WHY:+ ($RUNNER_READ_WHY)}"
+  else
+    # Distinguished from a missing line on purpose: an empty list is a fact about
+    # the machine -- no SVM sub-feature was exposed to it -- and a reader who
+    # cannot tell that from a read that never happened learns nothing from either.
+    add 'svm features: none (lscpu answered, and its flag list named no SVM sub-feature; an Intel host, or a guest given none)'
+  fi
 else
   add "cpu model: unavailable ($RUNNER_READ_WHY)"
+  add "svm features: unavailable ($RUNNER_READ_WHY)"
 fi
 
 # The file first, the log second, and neither conditional on the other. The file
