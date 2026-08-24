@@ -62,7 +62,18 @@ ownerReference or lookup-gated render.
 {{- if not .Values.cluster -}}
 {{- fail "kubernetes-nodes: .Values.cluster is required — set it to the parent Kubernetes CR name so the pool attaches to cluster kubernetes-<cluster>" -}}
 {{- end -}}
-{{- printf "kubernetes-%s" .Values.cluster -}}
+{{- /* clusterName is the parent cluster's HelmRelease/object name: the CAPI
+       Cluster and KamajiControlPlane are named after it, and every worker
+       object this chart renders (KMT/MD/MHC names, MachineDeployment
+       spec.clusterName, the version-guard lookup) must reference it. The
+       aggregated API names a Kubernetes cluster's release `kubernetes-<cluster>`,
+       which is the default and keeps every existing pool byte-identical. A
+       wrapper whose cluster release name does NOT follow that convention —
+       the ComputePlane module fixes its cluster release to `computeplane-cluster`
+       to satisfy the admin-kubeconfig Secret contract — sets clusterReleaseName
+       so its pools attach to the right cluster. See kubernetes-nodes.groupName:
+       .Values.cluster still drives the release-name prefix and error messages. */}}
+{{- .Values.clusterReleaseName | default (printf "kubernetes-%s" .Values.cluster) -}}
 {{- end -}}
 
 {{/*

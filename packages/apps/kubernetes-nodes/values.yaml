@@ -6,6 +6,18 @@
 ## @immutable
 cluster: ""
 
+# Internal wiring value `clusterReleaseName` (consumed by kubernetes-nodes.clusterName
+# in templates/_helpers.tpl) is deliberately NOT declared here and NOT a @param:
+# it must stay out of the public KubernetesNodes API (values.schema.json / CRD /
+# README), and cozyvalues-gen rejects a values.yaml key with no schema entry. It
+# is the parent cluster's HelmRelease/object name this pool's CAPI objects attach
+# to; when unset the helper derives it as `kubernetes-<cluster>`, the aggregated
+# API's naming convention, so every pool created through the API is unaffected. A
+# wrapper whose cluster release is named off that convention passes it in the
+# child HelmRelease values directly: the ComputePlane module fixes its cluster
+# release to `computeplane-cluster` (the admin-kubeconfig Secret contract) and
+# sets clusterReleaseName: computeplane-cluster so its pools attach correctly.
+
 ##
 ## @section Common Parameters
 ##

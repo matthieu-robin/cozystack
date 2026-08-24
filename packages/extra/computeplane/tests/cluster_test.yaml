@@ -1,4 +1,4 @@
-suite: computeplane module renders the operator-owned cluster HelmRelease
+suite: computeplane module renders the operator-owned cluster and worker pools
 # The module wraps the ordinary apps/kubernetes chart with operator-fixed
 # values (design-proposals/compute-plane in cozystack/community). These pins
 # are the contract:
@@ -14,6 +14,9 @@ suite: computeplane module renders the operator-owned cluster HelmRelease
 #     cluster via spec.kubeConfig;
 #   - the chart comes from this package's own source-only ExternalArtifact,
 #     keeping the module self-contained.
+# Phase 2 split worker pools into apps/kubernetes-nodes, so the module now also
+# emits one child HelmRelease per nodeGroup against this package's own
+# kubernetes-nodes artifact, wired to the parent via clusterReleaseName.
 templates:
   - templates/cluster.yaml
 release:
@@ -21,6 +24,9 @@ release:
   namespace: tenant-alice
 tests:
   - it: derives the cluster release name from the object name (kubeconfig contract)
+    documentSelector:
+      path: metadata.name
+      value: computeplane-cluster
     asserts:
       - equal:
           path: metadata.name
@@ -35,6 +41,9 @@ tests:
           value: ExternalArtifact
 
   - it: pins the Cozystack-enablement addons as inline values
+    documentSelector:
+      path: metadata.name
+      value: computeplane-cluster
     asserts:
       - notExists:
           path: spec.values.addons.fluxcd
@@ -57,12 +66,12 @@ tests:
           path: spec.upgrade.disableWait
           value: true
 
-  - it: leaves nodeGroups to the wrapped chart's default when unset
-    asserts:
-      - notExists:
-          path: spec.values.nodeGroups
-
-  - it: passes the curated nodeGroups knob through as cluster shape
+  # Phase 2 removed nodeGroups from the wrapped kubernetes chart; the parent
+  # HelmRelease must no longer carry it (it would silently do nothing).
+  - it: does not pass nodeGroups to the wrapped control-plane chart
+    documentSelector:
+      path: metadata.name
+      value: computeplane-cluster
     set:
       nodeGroups:
         md0:
@@ -72,12 +81,92 @@ tests:
           diskSize: 32Gi
           roles: ["ingress-nginx"]
     asserts:
+      - notExists:
+          path: spec.values.nodeGroups
+
+  # With nodeGroups unset, the pre-split wrapped chart injected a scale-from-zero
+  # md0 with roles: [ingress-nginx]; the module now materialises that pool itself
+  # so the pinned ingress-nginx addon has a node to schedule onto.
+  - it: materialises the default ingress-nginx md0 pool when nodeGroups is unset
+    documentSelector:
+      path: metadata.name
+      value: kubernetes-nodes-computeplane-cluster-md0
+    asserts:
       - equal:
-          path: spec.values.nodeGroups.md0.maxReplicas
-          value: 3
+          path: kind
+          value: HelmRelease
       - equal:
-          path: spec.values.nodeGroups.md0.instanceType
+          path: spec.chartRef.name
+          value: cozystack-computeplane-application-kubevirt-kubernetes-nodes
+      - equal:
+          path: spec.chartRef.kind
+          value: ExternalArtifact
+      - equal:
+          path: metadata.labels['apps.cozystack.io/application.kind']
+          value: KubernetesNodes
+      - equal:
+          path: metadata.labels['apps.cozystack.io/application.name']
+          value: computeplane-cluster-md0
+      - equal:
+          path: spec.values.cluster
+          value: computeplane-cluster
+      - equal:
+          path: spec.values.clusterReleaseName
+          value: computeplane-cluster
+      - equal:
+          path: spec.values.roles[0]
+          value: ingress-nginx
+      # canonical KubernetesNodes pool shape (mirrors rest.go): RetryOnFailure
+      # strategy + disableWait, not the parent module's remediation style.
+      - equal:
+          path: spec.install.strategy.name
+          value: RetryOnFailure
+      - equal:
+          path: spec.install.disableWait
+          value: true
+
+  # A tenant that supplies nodeGroups gets one pool HelmRelease per group,
+  # authoritative (not merged with the default md0), each wired to the parent.
+  - it: emits one pool HelmRelease per supplied nodeGroup
+    set:
+      nodeGroups:
+        md0:
+          minReplicas: 1
+          maxReplicas: 3
+          instanceType: u1.large
+          diskSize: 32Gi
+          roles: ["ingress-nginx"]
+        gpu0:
+          minReplicas: 0
+          maxReplicas: 2
+          instanceType: u1.xlarge
+          diskSize: 64Gi
+          roles: []
+          gpus:
+            - name: nvidia.com/AD102GL_L40S
+    asserts:
+      # three docs total: parent + two pools
+      - hasDocuments:
+          count: 3
+      - equal:
+          path: spec.values.instanceType
           value: u1.large
+        documentSelector:
+          path: metadata.name
+          value: kubernetes-nodes-computeplane-cluster-md0
+      - equal:
+          path: spec.values.gpus[0].name
+          value: nvidia.com/AD102GL_L40S
+        documentSelector:
+          path: metadata.name
+          value: kubernetes-nodes-computeplane-cluster-gpu0
+      # no implicit md0 is added on top of supplied groups
+      - equal:
+          path: spec.values.maxReplicas
+          value: 3
+        documentSelector:
+          path: metadata.name
+          value: kubernetes-nodes-computeplane-cluster-md0
 
   # Supplied nodeGroups are authoritative (not merged with the wrapped chart's
   # default md0), while the module pins ingress-nginx on — groups without the
@@ -96,6 +185,9 @@ tests:
           errorPattern: "at least one nodeGroup must carry roles"
 
   - it: accepts nodeGroups when any group carries the ingress-nginx role
+    documentSelector:
+      path: metadata.name
+      value: kubernetes-nodes-computeplane-cluster-edge
     set:
       nodeGroups:
         gpu0:
@@ -112,15 +204,18 @@ tests:
           roles: ["ingress-nginx"]
     asserts:
       - equal:
-          path: spec.values.nodeGroups.edge.roles[0]
+          path: spec.values.roles[0]
           value: ingress-nginx
 
   # The generator does not emit additionalProperties: false, so unlisted
   # NodeGroup fields are NOT rejected by the schema — they pass through to the
-  # wrapped chart unvalidated. Pinned deliberately (and stated in the README);
-  # if the generator ever learns to close the object, this test should flip to
+  # pool chart unvalidated. Pinned deliberately (and stated in the README); if
+  # the generator ever learns to close the object, this test should flip to
   # asserting rejection.
-  - it: passes unlisted nodeGroup fields through to the wrapped chart
+  - it: passes unlisted nodeGroup fields through to the pool chart
+    documentSelector:
+      path: metadata.name
+      value: kubernetes-nodes-computeplane-cluster-md0
     set:
       nodeGroups:
         md0:
@@ -132,5 +227,5 @@ tests:
           maxUnhealthy: 40%
     asserts:
       - equal:
-          path: spec.values.nodeGroups.md0.maxUnhealthy
+          path: spec.values.maxUnhealthy
           value: 40%
