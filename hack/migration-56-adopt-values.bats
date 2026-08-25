@@ -245,3 +245,23 @@ JSON
   grep -qF -- "STAMP" "$FAKE_CMDLOG"
   rm -rf "$WORK"
 }
+
+@test "a failed unadopted-ConfigMap publish does NOT abort the migration (best-effort record)" {
+  prep
+  # The record is a convenience artifact, not a safety mechanism: every skipped
+  # pool was already pinned prune-proof earlier in the sweep. A permanent publish
+  # failure (e.g. exceeding etcd's object-size limit) must NOT fail the migration
+  # closed and deadlock the fleet upgrade — it must warn and still stamp.
+  export FAKE_UNADOPTED_CM_FAIL=1
+  cat > "$FAKE_HR_LIST" <<'JSON'
+{"items":[{"metadata":{"namespace":"tenant-test","name":"kubernetes-verylongclustername-thirty"},"spec":{"values":{"nodeGroups":{"poolnamethatislong":{"minReplicas":0,"roles":["ingress-nginx"]}}}}}]}
+JSON
+  rc=0
+  bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
+  cat "$WORK/out"
+  [ "$rc" -eq 0 ]
+  grep -qF -- "could not publish the unadopted-pools record" "$WORK/out"
+  grep -qF -- "STAMP" "$FAKE_CMDLOG"
+  unset FAKE_UNADOPTED_CM_FAIL
+  rm -rf "$WORK"
+}

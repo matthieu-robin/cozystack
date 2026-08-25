@@ -562,12 +562,22 @@ kubectl get helmrelease --all-namespaces \
 # so without this an operator cannot locate the un-managed pools after the fact.
 # The ConfigMap is a plain data record (no no-delete label needed); a re-run of
 # the migration on a retry refreshes it via apply.
+#
+# Best-effort: the record is a convenience artifact, NOT a safety mechanism --
+# every skipped pool was already pinned prune-proof (pin_keep) earlier in the
+# sweep, so the workers are safe regardless of whether this write lands. Do not
+# let it gate the stamp: a permanent write failure (e.g. the record growing past
+# etcd's object-size limit at a very large skip count) would otherwise abort the
+# migration before the stamp and deadlock the fleet upgrade with no path out,
+# even though the data protection already completed. So swallow its failure with
+# a warning rather than failing closed.
 if [ -s "$SKIPPED_FILE" ]; then
   echo "WARNING: $(wc -l < "$SKIPPED_FILE" | tr -d ' ') pool(s) were pinned prune-proof but NOT adopted; recording them in configmap/cozystack-migration-56-unadopted in ${NAMESPACE:-cozy-system}. Migration 56 will not re-run, so these need manual recovery (adopt or recreate)." >&2
   kubectl create configmap cozystack-migration-56-unadopted \
     -n "${NAMESPACE:-cozy-system}" \
     --from-file=unadopted="$SKIPPED_FILE" \
-    --dry-run=client -o yaml | kubectl apply --filename -
+    --dry-run=client -o yaml | kubectl apply --filename - ||
+    echo "WARNING: could not publish the unadopted-pools record ConfigMap; the pools are still pinned prune-proof and safe, but you will need to find them in this Job's log above" >&2
 fi
 rm -f "$SKIPPED_FILE"
 

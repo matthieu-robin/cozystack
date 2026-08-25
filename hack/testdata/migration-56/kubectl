@@ -94,6 +94,12 @@ case "$verb" in
       printf '%s' "$payload" > "$FAKE_CHILD_HR"; log "APPLY-HR"
     elif printf '%s' "$payload" | grep -q 'ConfigMap'; then
       if printf '%s' "$payload" | grep -q 'cozystack-migration-56-unadopted'; then
+        # FAKE_UNADOPTED_CM_FAIL exercises the best-effort path: a permanent
+        # failure publishing the record must NOT abort the migration.
+        if [ -n "${FAKE_UNADOPTED_CM_FAIL:-}" ]; then
+          echo "Error from server: ConfigMap \"cozystack-migration-56-unadopted\" is invalid: exceeds object size limit" >&2
+          exit 1
+        fi
         log "APPLY-UNADOPTED-CM"
       else
         log "STAMP"
