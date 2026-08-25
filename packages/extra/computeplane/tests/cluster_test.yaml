@@ -241,6 +241,14 @@ tests:
           version: v1.31
           images:
             kubectl: evil.example.com/kubectl:latest
+          # platform-injected object (cluster-domain/oidc/dns01/proxy) delivered via
+          # the cozystack-values Secret: a tenant key must NOT reach the pool values
+          # (the allowlist splice drops anything it does not name — regression guard
+          # for the denylist hole this replaced)
+          _cluster:
+            cluster-domain: attacker.example.com
+          # helm nameOverride: not a pool-shape field, must not pass through
+          nameOverride: pwned
     asserts:
       - equal:
           path: spec.values.maxUnhealthy
@@ -257,6 +265,10 @@ tests:
           path: spec.values.version
       - notExists:
           path: spec.values.images
+      - notExists:
+          path: spec.values._cluster
+      - notExists:
+          path: spec.values.nameOverride
 
   # Helm caps a HelmRelease name at 53 chars and each pool renders a 38-char fixed
   # prefix, so a pool key over 15 chars would create a release the apiserver

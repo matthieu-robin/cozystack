@@ -39,6 +39,7 @@
   nodeGroups lacking the role would leave the controller Pending forever and
   the ComputePlane ingress would never come up.
 */}}
+{{- $clusterRelease := "computeplane-cluster" }}
 {{- if .Values.nodeGroups }}
 {{- $hasIngressRole := false }}
 {{- range $name, $group := .Values.nodeGroups }}
@@ -46,16 +47,19 @@
 {{- $hasIngressRole = true }}
 {{- end }}
 {{- /* Helm caps a HelmRelease name at 53 chars. Every pool renders
-       kubernetes-nodes-computeplane-cluster-<pool> (a 38-char fixed prefix), so a
-       pool key longer than 15 chars yields a name the apiserver accepts as a valid
-       DNS-1123 subdomain but Flux then never reconciles, with no other signal. The
+       kubernetes-nodes-<clusterRelease>-<pool>; with clusterRelease
+       "computeplane-cluster" that is a 38-char fixed prefix, so a pool key longer
+       than 15 chars yields a name the apiserver accepts as a valid DNS-1123
+       subdomain but Flux then never reconciles, with no other signal. The
        NodeGroup schema puts no maxLength on the key, so guard it here at render
        time (mirrors the aggregated API's validateNameLength and migration 56's
        overflow branch — the same 53-char cap this split hits on every other
-       path). */}}
-{{- $childName := printf "kubernetes-nodes-computeplane-cluster-%s" $name }}
+       path). Derived from $clusterRelease so it cannot drift from the name
+       rendered below. */}}
+{{- $childName := printf "kubernetes-nodes-%s-%s" $clusterRelease $name }}
 {{- if gt (len $childName) 53 }}
-{{- fail (printf "computeplane: nodeGroup %q renders pool HelmRelease name %q (%d chars), which exceeds Helm's 53-char limit; the release would be created but never reconcile. Rename the pool to at most 15 characters." $name $childName (len $childName)) }}
+{{- $budget := sub 53 (len (printf "kubernetes-nodes-%s-" $clusterRelease)) }}
+{{- fail (printf "computeplane: nodeGroup %q renders pool HelmRelease name %q (%d chars), which exceeds Helm's 53-char limit; the release would be created but never reconcile. Rename the pool to at most %d characters." $name $childName (len $childName) $budget) }}
 {{- end }}
 {{- end }}
 {{- if not $hasIngressRole }}
@@ -137,7 +141,6 @@ spec:
   module materialises the same md0 here, otherwise the pinned ingress-nginx
   addon would have no node to schedule onto and stay Pending forever.
 */}}
-{{- $clusterRelease := "computeplane-cluster" }}
 {{- $pools := .Values.nodeGroups }}
 {{- if not $pools }}
 {{- $pools = dict "md0" (dict "roles" (list "ingress-nginx") "minReplicas" 0) }}
@@ -175,20 +178,23 @@ spec:
   values:
     cluster: {{ $clusterRelease }}
     clusterReleaseName: {{ $clusterRelease }}
-    {{- /* Splice only the pool's own shape. omit the module-owned wiring keys
-           (cluster, clusterReleaseName) so a tenant group key of the same name
-           cannot render a duplicate YAML key that overrides the two lines above —
-           sigs.k8s.io/yaml keeps the last duplicate, so an attacker-set
-           clusterReleaseName would otherwise re-parent this pool's MD/KMT/MHC onto
-           a cluster the tenant controls — and omit the cluster-level keys (talos,
-           version, images) so a tenant cannot pick the worker OS image, Talos
-           installer or kubelet version through this shape-only knob (nodegroup.yaml
-           builds the worker disk image from talos.imageFactoryURL/schematicID and
-           the in-guest installer from talos.installerRepository). The NodeGroup
-           schema has no additionalProperties:false, so without this omit every one
-           of these keys passes through verbatim. Documented NodeGroup fields plus
-           tolerated extras (e.g. maxUnhealthy) still flow through unchanged. */}}
-    {{- with omit $group "cluster" "clusterReleaseName" "talos" "version" "images" }}
+    {{- /* Splice ONLY the pool's own shape, as an explicit allowlist (pick), not a
+           denylist. This module runs untrusted tenant code and the NodeGroup schema
+           has no additionalProperties:false, so a tenant can put ANY key in a
+           nodeGroup and it validates. A denylist (omit a few known-bad keys) leaks
+           every key it does not name — e.g. the platform-injected `_cluster` object
+           (cluster-domain, oidc, dns01/proxy config; delivered via the
+           cozystack-values Secret in valuesFrom, and Flux merges spec.values OVER
+           valuesFrom so a tenant key wins), or `nameOverride` — and silently
+           re-opens the hole every time kubernetes-nodes gains a new top-level value.
+           So enumerate exactly the per-pool shape fields kubernetes-nodes accepts
+           and pass through only those. Everything cluster-level or module-owned
+           (cluster, clusterReleaseName, talos, version, images, _cluster,
+           nameOverride, ...) is dropped by construction: the module sets cluster/
+           clusterReleaseName itself above, and a tenant cannot pick the worker OS
+           image / Talos installer / kubelet version / cluster wiring. Keep this list
+           in sync with the kubernetes-nodes values schema's pool-shape params. */}}
+    {{- with pick $group "minReplicas" "maxReplicas" "instanceType" "diskSize" "storageClass" "roles" "resources" "gpus" "kubelet" "logSerialConsole" "maxUnhealthy" "nodeStartupTimeout" "readyUnknownTimeout" "readyFalseTimeout" "podCpuLimit" "podCpuRequest" "maxNodeProvisionTime" }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
   valuesFrom:
