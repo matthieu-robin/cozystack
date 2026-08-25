@@ -87,11 +87,22 @@ CHILD_CHART_REF_NAME="cozystack-kubernetes-nodes-application-kubevirt-kubernetes
 PARENT_CHART_REF_NAME="cozystack-kubernetes-application-kubevirt-kubernetes"
 # Older parents (created before cozystack-api moved to spec.chartRef, 43da779ee
 # 2026-01-14) carry an inline spec.chart instead: spec.chart.spec.chart is the
-# chart name "kubernetes" sourced from the cozystack-apps HelmRepository
-# (kubernetes-rd release.chart before 8e9c0dd5a). The application.kind label
-# predates chartRef (fdca49838 2025-12-19), so the unlabelled parents the restamp
-# below exists to catch are exactly this inline-chart shape -- matching only
-# chartRef would miss every one of them. Discover both shapes.
+# chart name "kubernetes" (real parents source it from the cozystack-apps
+# HelmRepository; kubernetes-rd release.chart before 8e9c0dd5a). The
+# application.kind label predates chartRef (fdca49838 2025-12-19), so the
+# unlabelled parents the restamp below exists to catch are exactly this
+# inline-chart shape -- matching only chartRef would miss every one of them.
+# Discover both shapes.
+#
+# The inline branch matches the chart NAME only, deliberately NOT the sourceRef:
+# the historical sourceRef name/namespace is not pinned across every past release,
+# and gating on it risks UNDER-matching a real legacy parent -- which means its
+# workers are neither adopted nor label-restamped and get pruned (data loss). The
+# looser match's worst case is the opposite and harmless: a non-cozystack HR
+# named kubernetes-* that happens to carry an inline chart literally named
+# "kubernetes" gets mislabelled (spurious child HR, no prune, no data loss). The
+# chart's render-time worker-adoption guard is the data-loss backstop regardless,
+# so this trades a low mislabel risk for zero under-match risk on purpose.
 PARENT_INLINE_CHART_NAME="kubernetes"
 
 # Durable record of pools that were pinned prune-proof but NOT adopted (every
@@ -412,9 +423,11 @@ kubectl get helmrelease --all-namespaces \
         continue
       fi
 
-      # Helm refuses release names longer than 53 characters. A legal long
-      # cluster name (up to 42 chars per rest.go) plus the longer
-      # kubernetes-nodes- prefix can overflow. Do NOT fail the whole migration
+      # Helm refuses release names longer than 53 characters. rest.go today caps a
+      # new cluster name at 32 (maxKubernetesClusterName = 53 - len("kubernetes-nodes-")
+      # - len("-md0")) precisely so its pools fit, but a legacy or hand-created
+      # cluster name can be longer, and combined with the longer kubernetes-nodes-
+      # prefix the child name can overflow. Do NOT fail the whole migration
       # here: exiting would deadlock the platform pre-upgrade hook for EVERY
       # tenant, with no path out. Instead pin this pool's worker objects with
       # resource-policy=keep so the parent's control-plane-only re-render cannot
@@ -591,7 +604,7 @@ kubectl get helmrelease --all-namespaces \
 # even though the data protection already completed. So swallow its failure with
 # a warning rather than failing closed.
 if [ -s "$SKIPPED_FILE" ]; then
-  echo "WARNING: $(wc -l < "$SKIPPED_FILE" | tr -d ' ') pool(s) were pinned prune-proof but NOT adopted; recording them in configmap/cozystack-migration-56-unadopted in ${NAMESPACE:-cozy-system}. Migration 56 will not re-run, so these need manual recovery (adopt or recreate)." >&2
+  echo "WARNING: wrote $(wc -l < "$SKIPPED_FILE" | tr -d ' ') record(s) of worker objects/pools pinned prune-proof but NOT adopted to configmap/cozystack-migration-56-unadopted in ${NAMESPACE:-cozy-system} (one line per skipped worker object or pool -- a foreign-owned pool contributes one line per object, so this is a line count, not a distinct-pool count; read the configmap for the breakdown). Migration 56 will not re-run, so these need manual recovery (adopt or recreate)." >&2
   kubectl create configmap cozystack-migration-56-unadopted \
     -n "${NAMESPACE:-cozy-system}" \
     --from-file=unadopted="$SKIPPED_FILE" \
