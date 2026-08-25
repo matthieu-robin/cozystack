@@ -95,7 +95,12 @@ PARENT_CHART_REF_NAME="cozystack-kubernetes-application-kubevirt-kubernetes"
 # before the stamp (below). A real file, so appends inside the sweep's while
 # subshell persist.
 SKIPPED_FILE=$(mktemp)
-record_skip() { echo "$1" >> "$SKIPPED_FILE"; }
+# Fail-open: recording a skip is a diagnostic aid, not a safety mechanism (the
+# pool is already pinned prune-proof when this is called). It runs under set -e in
+# a skip branch that must NOT abort -- a failed append (e.g. /tmp full) must not
+# deadlock the fleet upgrade for one tenant, exactly the invariant every
+# warn+pin+continue branch preserves.
+record_skip() { echo "$1" >> "$SKIPPED_FILE" || true; }
 
 # The implicit default node group the parent chart's kubernetes.nodeGroups helper
 # injected when spec.values.nodeGroups was empty. Materialised explicitly so a
@@ -156,6 +161,7 @@ adopt_one() {
     echo "    WARNING: $res/$obj owned by unexpected release '$cur' (expected '$old_rel'); pinning resource-policy=keep and skipping adoption of this object" >&2
     echo "    WARNING: remedy: if it genuinely belongs to this pool, re-annotate meta.helm.sh/release-name=$new_rel on $res/$obj manually; migration 56 has already stamped and will not re-run" >&2
     pin_keep "$res" "$obj" "$ns"
+    record_skip "$ns object $res/$obj: owned by foreign release '$cur' (expected '$old_rel'); pinned prune-proof, NOT adopted -- child release '$new_rel' may stay Failed on an ownership conflict until this object is re-annotated"
     return 0
   fi
   echo "    adopting $res/$obj -> $new_rel"
@@ -296,6 +302,7 @@ pin_cluster_pools() {
 kubectl get helmrelease --all-namespaces -o json |
   jq -r --arg chart "$PARENT_CHART_REF_NAME" '.items[]
       | select(.spec.chartRef.name == $chart)
+      | select(.metadata.name | startswith("kubernetes-"))
       | select(.metadata.labels["apps.cozystack.io/application.kind"] != "Kubernetes")
       | "\(.metadata.namespace) \(.metadata.name)"' |
   while IFS=' ' read -r ns name; do

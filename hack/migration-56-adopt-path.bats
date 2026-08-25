@@ -112,6 +112,11 @@ OBJS
   # The sibling parent-owned MHC still adopts, and the run stamps.
   grep -qE 'annotate machinehealthcheck.* meta.helm.sh/release-name=kubernetes-nodes-test3-md0' "$FAKE_CMDLOG"
   grep -qF -- "STAMP" "$FAKE_CMDLOG"
+  # The foreign-owned object is a pinned-but-unadopted case too, so it must land
+  # in the durable unadopted record (not only the reaped Job log): the child HR
+  # can stay Failed on it and an operator needs to find it after the fact.
+  grep -qF -- "APPLY-UNADOPTED-CM" "$FAKE_CMDLOG"
+  grep -qiE 'pinned prune-proof but NOT adopted' "$WORK/out"
   rm -rf "$WORK"
 }
 

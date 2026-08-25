@@ -204,10 +204,18 @@ JSON
   rm -rf "$WORK"
 }
 
-@test "a labelled parent HR is NOT restamped (no redundant label write)" {
+@test "a labelled parent HR (chartRef + application.kind label) is NOT restamped (no redundant label write)" {
   prep
-  # The default fixture (kubernetes-test3) carries no chartRef, so the restamp
-  # selector must not match it; a run must issue no label helmrelease command.
+  # A parent that carries BOTH the kubernetes chartRef AND the application.kind
+  # label is already correctly labelled: the restamp's label-absence guard
+  # (select .kind != "Kubernetes") must exclude it so it is not re-labelled on
+  # every upgrade. A fixture WITHOUT the chartRef would be dropped by the chartRef
+  # filter regardless and leave this guard untested, so seed the chartRef too and
+  # exercise exactly the label guard. Assert no `label helmrelease` is issued
+  # (the sweep's own `label machinedeployment ... managed-by` does not match).
+  cat > "$FAKE_HR_LIST" <<'JSON'
+{"items":[{"metadata":{"namespace":"tenant-test","name":"kubernetes-test3","labels":{"apps.cozystack.io/application.kind":"Kubernetes"}},"spec":{"chartRef":{"name":"cozystack-kubernetes-application-kubevirt-kubernetes"},"values":{"nodeGroups":{"md0":{"minReplicas":1,"roles":["ingress-nginx"]}}}}}]}
+JSON
   rc=0
   bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
   [ "$rc" -eq 0 ]
