@@ -287,3 +287,23 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "exceeds Helm's 53-char limit"
+      # the remedy budget is derived (sub 53 (len prefix)) — pin it so a wrong
+      # computation is caught, not just the presence of the error
+      - failedTemplate:
+          errorPattern: "Rename the pool to at most 15 characters"
+
+  # The pool key becomes the HelmRelease name and CAPI object names (RFC-1123
+  # labels). An uppercase/underscore key would render an invalid metadata.name;
+  # the render must refuse early and uniformly, like the length guard.
+  - it: refuses a pool name that is not a valid RFC-1123 label
+    set:
+      nodeGroups:
+        Bad_Pool:
+          minReplicas: 1
+          maxReplicas: 1
+          instanceType: u1.medium
+          diskSize: 20Gi
+          roles: ["ingress-nginx"]
+    asserts:
+      - failedTemplate:
+          errorPattern: "is not a valid RFC-1123 label"

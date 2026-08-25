@@ -46,6 +46,16 @@
 {{- if and (has "ingress-nginx" (default (list) $group.roles)) (gt (int (default 0 $group.maxReplicas)) 0) }}
 {{- $hasIngressRole = true }}
 {{- end }}
+{{- /* The pool key becomes the pool HelmRelease name and its CAPI object names,
+       which must be RFC-1123 labels. The NodeGroup schema has no propertyNames
+       pattern, so an uppercase/underscore key renders an invalid metadata.name the
+       apiserver rejects, and a key with a ':' renders invalid YAML that fails the
+       whole module render. Guard it here so the failure is uniform and early,
+       alongside the length check (mirrors migration 56's RFC-1123 child-name
+       guard). */}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $name) }}
+{{- fail (printf "computeplane: nodeGroup key %q is not a valid RFC-1123 label (lowercase alphanumeric and '-', must start and end alphanumeric); it would render an invalid pool HelmRelease name. Rename the pool." $name) }}
+{{- end }}
 {{- /* Helm caps a HelmRelease name at 53 chars. Every pool renders
        kubernetes-nodes-<clusterRelease>-<pool>; with clusterRelease
        "computeplane-cluster" that is a 38-char fixed prefix, so a pool key longer
