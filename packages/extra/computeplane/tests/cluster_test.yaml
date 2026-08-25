@@ -208,14 +208,15 @@ tests:
           value: ingress-nginx
 
   # The generator does not emit additionalProperties: false, so unlisted
-  # NodeGroup fields are NOT rejected by the schema. Shape extras (e.g.
-  # maxUnhealthy — a valid kubernetes-nodes pool field) must still flow through,
-  # but the splice omits the module-owned wiring keys (cluster,
-  # clusterReleaseName) and the cluster-level keys (talos, version, images):
-  # without the omit a tenant group key of the same name would render a duplicate
-  # YAML key that overrides the module's wiring (re-parenting the pool onto a
-  # tenant-controlled cluster) or would let a shape-only knob choose the worker OS
-  # image / kubelet version. This case pins both directions.
+  # NodeGroup fields are NOT rejected by the schema. The splice is an allowlist
+  # (pick), so documented pool-shape extras (e.g. maxUnhealthy — a valid
+  # kubernetes-nodes pool field) still flow through, while everything it does not
+  # name is dropped: the module-owned wiring keys (cluster, clusterReleaseName) so
+  # a tenant group key of the same name cannot render a duplicate YAML key that
+  # re-parents the pool onto a tenant-controlled cluster, and the cluster-level
+  # keys (talos, version, images) plus platform keys (_cluster, nameOverride) so a
+  # shape-only knob cannot choose the worker OS image / kubelet version. This case
+  # pins both directions.
   - it: passes shape fields through but strips module-owned and cluster-level keys
     documentSelector:
       path: metadata.name
