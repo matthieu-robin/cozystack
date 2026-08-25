@@ -181,3 +181,67 @@ JSON
   [ "$(jq -r '.spec.values.maxNodeProvisionTime' "$FAKE_CHILD_HR")" = "45m" ]
   rm -rf "$WORK"
 }
+
+@test "an unlabelled parent HR (kubernetes chartRef, no application.kind label) is restamped before the sweep" {
+  prep
+  # A parent kubernetes HelmRelease predating the apps.cozystack.io/application.kind
+  # label (fdca49838, ~v1.2), or one restored/created by hand, is identified by its
+  # chartRef rather than the label. The migration must relabel it BEFORE the
+  # label-selected sweep, otherwise the sweep skips it, stamps, and the parent's
+  # control-plane-only re-render prunes its un-pinned workers. Fixture carries the
+  # parent chartRef and NO application labels; assert all three labels are written.
+  cat > "$FAKE_HR_LIST" <<'JSON'
+{"items":[{"metadata":{"namespace":"tenant-legacy","name":"kubernetes-old"},"spec":{"chartRef":{"name":"cozystack-kubernetes-application-kubevirt-kubernetes"},"values":{"nodeGroups":{"md0":{"minReplicas":0,"roles":["ingress-nginx"]}}}}}]}
+JSON
+  rc=0
+  bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
+  cat "$WORK/out"
+  [ "$rc" -eq 0 ]
+  grep -qF -- "restamping application labels on unlabelled parent tenant-legacy/kubernetes-old" "$WORK/out"
+  grep -qE 'label helmrelease kubernetes-old .*apps.cozystack.io/application.kind=Kubernetes' "$FAKE_CMDLOG"
+  grep -qE 'label helmrelease kubernetes-old .*apps.cozystack.io/application.group=apps.cozystack.io' "$FAKE_CMDLOG"
+  grep -qE 'label helmrelease kubernetes-old .*apps.cozystack.io/application.name=old' "$FAKE_CMDLOG"
+  rm -rf "$WORK"
+}
+
+@test "a labelled parent HR is NOT restamped (no redundant label write)" {
+  prep
+  # The default fixture (kubernetes-test3) carries no chartRef, so the restamp
+  # selector must not match it; a run must issue no label helmrelease command.
+  rc=0
+  bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
+  [ "$rc" -eq 0 ]
+  ! grep -qE 'label helmrelease' "$FAKE_CMDLOG"
+  rm -rf "$WORK"
+}
+
+@test "pinned-but-unadopted pools are published to the unadopted ConfigMap before the stamp" {
+  prep
+  # A pool the migration pins prune-proof but cannot adopt (here: child release
+  # name over 53 chars) must leave a durable record — the Job-log warnings are
+  # reaped by the next upgrade's before-hook-creation policy and migration 56 does
+  # not re-run. Assert the unadopted ConfigMap is applied AND the run still stamps.
+  cat > "$FAKE_HR_LIST" <<'JSON'
+{"items":[{"metadata":{"namespace":"tenant-test","name":"kubernetes-verylongclustername-thirty"},"spec":{"values":{"nodeGroups":{"poolnamethatislong":{"minReplicas":0,"roles":["ingress-nginx"]}}}}}]}
+JSON
+  rc=0
+  bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
+  cat "$WORK/out"
+  [ "$rc" -eq 0 ]
+  grep -qF -- "pinned prune-proof but NOT adopted" "$WORK/out"
+  grep -qF -- "APPLY-UNADOPTED-CM" "$FAKE_CMDLOG"
+  grep -qF -- "STAMP" "$FAKE_CMDLOG"
+  rm -rf "$WORK"
+}
+
+@test "a clean run writes NO unadopted ConfigMap (empty skip record)" {
+  prep
+  # The default fixture adopts cleanly (no skip branch), so no unadopted ConfigMap
+  # must be applied — only the version STAMP.
+  rc=0
+  bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
+  [ "$rc" -eq 0 ]
+  ! grep -qF -- "APPLY-UNADOPTED-CM" "$FAKE_CMDLOG"
+  grep -qF -- "STAMP" "$FAKE_CMDLOG"
+  rm -rf "$WORK"
+}

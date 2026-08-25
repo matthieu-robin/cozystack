@@ -93,12 +93,25 @@ case "$verb" in
       fi
       printf '%s' "$payload" > "$FAKE_CHILD_HR"; log "APPLY-HR"
     elif printf '%s' "$payload" | grep -q 'ConfigMap'; then
-      log "STAMP"
+      if printf '%s' "$payload" | grep -q 'cozystack-migration-56-unadopted'; then
+        log "APPLY-UNADOPTED-CM"
+      else
+        log "STAMP"
+      fi
     else
       log "APPLY-OTHER"
     fi
     exit 0 ;;
   annotate) log "annotate $args"; exit 0 ;;
   label)    log "label $args"; exit 0 ;;
+  create)
+    # Only `create configmap cozystack-migration-56-unadopted --from-file ...
+    # --dry-run=client -o yaml` is used; emit a minimal ConfigMap manifest so the
+    # piped `apply --filename -` receives it and logs APPLY-UNADOPTED-CM.
+    case "$args" in
+      *configmap*cozystack-migration-56-unadopted*)
+        printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cozystack-migration-56-unadopted\n' ;;
+    esac
+    exit 0 ;;
   *) exit 0 ;;
 esac

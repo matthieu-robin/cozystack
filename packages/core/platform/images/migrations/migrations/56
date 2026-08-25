@@ -84,6 +84,18 @@ set -euo pipefail
 . "$(dirname "$0")/lib/cozystack-version.sh"
 
 CHILD_CHART_REF_NAME="cozystack-kubernetes-nodes-application-kubevirt-kubernetes-nodes"
+PARENT_CHART_REF_NAME="cozystack-kubernetes-application-kubevirt-kubernetes"
+
+# Durable record of pools that were pinned prune-proof but NOT adopted (every
+# warn+pin+skip branch below). These warnings otherwise live only in this Job's
+# log, which the next upgrade's before-hook-creation delete policy reaps, so an
+# operator hunting the un-managed pools after the fact has nothing to go on --
+# migration 56 stamps unconditionally and does not re-run. Each skip appends one
+# line here; if any survive the sweep the lines are published as a ConfigMap
+# before the stamp (below). A real file, so appends inside the sweep's while
+# subshell persist.
+SKIPPED_FILE=$(mktemp)
+record_skip() { echo "$1" >> "$SKIPPED_FILE"; }
 
 # The implicit default node group the parent chart's kubernetes.nodeGroups helper
 # injected when spec.values.nodeGroups was empty. Materialised explicitly so a
@@ -266,6 +278,35 @@ pin_cluster_pools() {
   done
 }
 
+# The sweep below selects parents by the apps.cozystack.io/application.kind label,
+# but that label postdates v1.2 (commit fdca49838, 2025-12-10): a parent
+# kubernetes HelmRelease created before it, or one restored/created by hand, does
+# not carry the label. The label selector would then skip that cluster entirely,
+# the migration would report success and stamp 57, and the parent's
+# control-plane-only re-render would prune its un-pinned workers with no pin and
+# no warning -- the exact data loss every skip branch below pins to avoid, here
+# reached by a labelling gap instead of a hostile value. The chartRef identifies a
+# kubernetes cluster release regardless of labels, so restamp the three
+# application labels on any such release FIRST, then let the sweep pick it up like
+# any other. A label write is additive and cannot corrupt a release (same
+# reasoning as pinning keep on the foreign-owner branch); it also repairs the
+# release for everything else that filters on that label (cozystack-api's List,
+# the lineage webhook), not only for this migration. Runs under set -e/pipefail,
+# so a genuine label failure aborts before the stamp and retries next upgrade.
+kubectl get helmrelease --all-namespaces -o json |
+  jq -r --arg chart "$PARENT_CHART_REF_NAME" '.items[]
+      | select(.spec.chartRef.name == $chart)
+      | select(.metadata.labels["apps.cozystack.io/application.kind"] != "Kubernetes")
+      | "\(.metadata.namespace) \(.metadata.name)"' |
+  while IFS=' ' read -r ns name; do
+    [ -n "$ns" ] || continue
+    echo "restamping application labels on unlabelled parent $ns/$name (chartRef $PARENT_CHART_REF_NAME, missing apps.cozystack.io/application.kind)"
+    kubectl label helmrelease "$name" -n "$ns" --overwrite \
+      apps.cozystack.io/application.kind=Kubernetes \
+      apps.cozystack.io/application.group=apps.cozystack.io \
+      "apps.cozystack.io/application.name=${name#kubernetes-}"
+  done
+
 kubectl get helmrelease --all-namespaces \
   -l apps.cozystack.io/application.kind=Kubernetes -o json |
   jq -c '.items[] | {ns: .metadata.namespace, name: .metadata.name, values: (.spec.values // {})}' |
@@ -300,6 +341,7 @@ kubectl get helmrelease --all-namespaces \
     if [ "$groups_type" != "object" ]; then
       echo "  WARNING: nodeGroups of cluster '$cluster' is a $groups_type, not an object; pinning its live worker pools with resource-policy=keep and skipping adoption" >&2
       pin_cluster_pools "$cluster" "$ns"
+      record_skip "$ns/$name: nodeGroups is a $groups_type (not an object); live worker pools pinned prune-proof, NOT adopted"
       continue
     fi
     if [ "$(printf '%s' "$groups_json" | jq 'length')" -eq 0 ]; then
@@ -347,6 +389,7 @@ kubectl get helmrelease --all-namespaces \
         echo "  WARNING: pinning pool '$cluster'/'$group' objects with resource-policy=keep and skipping adoption" >&2
         echo "  WARNING: remedy: recreate the pool with an RFC-1123 name (lowercase alphanumeric and '-', must start and end alphanumeric)" >&2
         pin_pool_objects "$cluster" "$group" "$ns"
+        record_skip "$ns/$name pool '$group': child name '$child_name' is not a valid RFC-1123 label; objects pinned prune-proof, NOT adopted"
         continue
       fi
 
@@ -364,6 +407,7 @@ kubectl get helmrelease --all-namespaces \
         echo "  WARNING: pinning pool '$cluster'/'$group' objects with resource-policy=keep and skipping adoption" >&2
         echo "  WARNING: remedy: recreate the cluster with a shorter name (cluster+pool must fit in 36 chars)" >&2
         pin_pool_objects "$cluster" "$group" "$ns"
+        record_skip "$ns/$name pool '$group': child name '$child_name' (${#child_name} chars) exceeds Helm's 53-char limit; objects pinned prune-proof, NOT adopted"
         continue
       fi
 
@@ -375,6 +419,7 @@ kubectl get helmrelease --all-namespaces \
       if [ "$grp" = "null" ]; then
         echo "  WARNING: nodeGroup '$group' of cluster '$cluster' has a non-object value; pinning its objects with resource-policy=keep and skipping adoption" >&2
         pin_pool_objects "$cluster" "$group" "$ns"
+        record_skip "$ns/$name pool '$group': non-object group value; objects pinned prune-proof, NOT adopted"
         continue
       fi
 
@@ -399,6 +444,7 @@ kubectl get helmrelease --all-namespaces \
         echo "  WARNING: nodeGroup '$group' of cluster '$cluster' has non-scalar value(s) for field(s) [$bad_scalar]; pinning its objects with resource-policy=keep and skipping adoption" >&2
         echo "  WARNING: remedy: restore the field(s) to a scalar on the parent Kubernetes CR's nodeGroups.$group, then recreate the pool; migration 56 has already stamped and will not re-run" >&2
         pin_pool_objects "$cluster" "$group" "$ns"
+        record_skip "$ns/$name pool '$group': non-scalar value(s) for field(s) [$bad_scalar]; objects pinned prune-proof, NOT adopted"
         continue
       fi
 
@@ -509,6 +555,21 @@ kubectl get helmrelease --all-namespaces \
       fi
     done
   done
+
+# Publish a durable record of any pool that was pinned prune-proof but not
+# adopted, BEFORE stamping: the per-Job log warnings are reaped by the next
+# upgrade's before-hook-creation delete policy, and migration 56 does not re-run,
+# so without this an operator cannot locate the un-managed pools after the fact.
+# The ConfigMap is a plain data record (no no-delete label needed); a re-run of
+# the migration on a retry refreshes it via apply.
+if [ -s "$SKIPPED_FILE" ]; then
+  echo "WARNING: $(wc -l < "$SKIPPED_FILE" | tr -d ' ') pool(s) were pinned prune-proof but NOT adopted; recording them in configmap/cozystack-migration-56-unadopted in ${NAMESPACE:-cozy-system}. Migration 56 will not re-run, so these need manual recovery (adopt or recreate)." >&2
+  kubectl create configmap cozystack-migration-56-unadopted \
+    -n "${NAMESPACE:-cozy-system}" \
+    --from-file=unadopted="$SKIPPED_FILE" \
+    --dry-run=client -o yaml | kubectl apply --filename -
+fi
+rm -f "$SKIPPED_FILE"
 
 # Stamp version via the shared helper so the no-delete label is preserved.
 stamp_cozystack_version 57
