@@ -208,11 +208,15 @@ tests:
           value: ingress-nginx
 
   # The generator does not emit additionalProperties: false, so unlisted
-  # NodeGroup fields are NOT rejected by the schema — they pass through to the
-  # pool chart unvalidated. Pinned deliberately (and stated in the README); if
-  # the generator ever learns to close the object, this test should flip to
-  # asserting rejection.
-  - it: passes unlisted nodeGroup fields through to the pool chart
+  # NodeGroup fields are NOT rejected by the schema. Shape extras (e.g.
+  # maxUnhealthy — a valid kubernetes-nodes pool field) must still flow through,
+  # but the splice omits the module-owned wiring keys (cluster,
+  # clusterReleaseName) and the cluster-level keys (talos, version, images):
+  # without the omit a tenant group key of the same name would render a duplicate
+  # YAML key that overrides the module's wiring (re-parenting the pool onto a
+  # tenant-controlled cluster) or would let a shape-only knob choose the worker OS
+  # image / kubelet version. This case pins both directions.
+  - it: passes shape fields through but strips module-owned and cluster-level keys
     documentSelector:
       path: metadata.name
       value: kubernetes-nodes-computeplane-cluster-md0
@@ -224,8 +228,50 @@ tests:
           instanceType: u1.large
           diskSize: 32Gi
           roles: ["ingress-nginx"]
+          # tolerated shape extra: must pass through
           maxUnhealthy: 40%
+          # module-owned wiring: a duplicate key must NOT override the module value
+          cluster: attacker-cluster
+          clusterReleaseName: kubernetes-attacker
+          # cluster-level worker-image keys: a shape-only knob must NOT let a tenant
+          # pick the worker OS image / installer / kubelet version
+          talos:
+            imageFactoryURL: https://evil.example.com
+            installerRepository: evil.example.com/installer
+          version: v1.31
+          images:
+            kubectl: evil.example.com/kubectl:latest
     asserts:
       - equal:
           path: spec.values.maxUnhealthy
           value: 40%
+      - equal:
+          path: spec.values.cluster
+          value: computeplane-cluster
+      - equal:
+          path: spec.values.clusterReleaseName
+          value: computeplane-cluster
+      - notExists:
+          path: spec.values.talos
+      - notExists:
+          path: spec.values.version
+      - notExists:
+          path: spec.values.images
+
+  # Helm caps a HelmRelease name at 53 chars and each pool renders a 38-char fixed
+  # prefix, so a pool key over 15 chars would create a release the apiserver
+  # accepts but Flux never reconciles. The render must refuse instead (the same
+  # 53-char cap the migration overflow branch and the aggregated API already
+  # guard on their own paths).
+  - it: refuses a pool name that overflows Helm's 53-char release-name cap
+    set:
+      nodeGroups:
+        workers-for-analytics-jobs:
+          minReplicas: 1
+          maxReplicas: 3
+          instanceType: u1.medium
+          diskSize: 20Gi
+          roles: ["ingress-nginx"]
+    asserts:
+      - failedTemplate:
+          errorPattern: "exceeds Helm's 53-char limit"

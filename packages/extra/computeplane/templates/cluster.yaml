@@ -45,6 +45,18 @@
 {{- if and (has "ingress-nginx" (default (list) $group.roles)) (gt (int (default 0 $group.maxReplicas)) 0) }}
 {{- $hasIngressRole = true }}
 {{- end }}
+{{- /* Helm caps a HelmRelease name at 53 chars. Every pool renders
+       kubernetes-nodes-computeplane-cluster-<pool> (a 38-char fixed prefix), so a
+       pool key longer than 15 chars yields a name the apiserver accepts as a valid
+       DNS-1123 subdomain but Flux then never reconciles, with no other signal. The
+       NodeGroup schema puts no maxLength on the key, so guard it here at render
+       time (mirrors the aggregated API's validateNameLength and migration 56's
+       overflow branch — the same 53-char cap this split hits on every other
+       path). */}}
+{{- $childName := printf "kubernetes-nodes-computeplane-cluster-%s" $name }}
+{{- if gt (len $childName) 53 }}
+{{- fail (printf "computeplane: nodeGroup %q renders pool HelmRelease name %q (%d chars), which exceeds Helm's 53-char limit; the release would be created but never reconcile. Rename the pool to at most 15 characters." $name $childName (len $childName)) }}
+{{- end }}
 {{- end }}
 {{- if not $hasIngressRole }}
 {{- fail "computeplane: at least one nodeGroup must carry roles: [ingress-nginx] with maxReplicas >= 1 — the module pins the ingress-nginx addon on, and its controller only schedules onto ingress-nginx nodes" }}
@@ -163,7 +175,20 @@ spec:
   values:
     cluster: {{ $clusterRelease }}
     clusterReleaseName: {{ $clusterRelease }}
-    {{- with $group }}
+    {{- /* Splice only the pool's own shape. omit the module-owned wiring keys
+           (cluster, clusterReleaseName) so a tenant group key of the same name
+           cannot render a duplicate YAML key that overrides the two lines above —
+           sigs.k8s.io/yaml keeps the last duplicate, so an attacker-set
+           clusterReleaseName would otherwise re-parent this pool's MD/KMT/MHC onto
+           a cluster the tenant controls — and omit the cluster-level keys (talos,
+           version, images) so a tenant cannot pick the worker OS image, Talos
+           installer or kubelet version through this shape-only knob (nodegroup.yaml
+           builds the worker disk image from talos.imageFactoryURL/schematicID and
+           the in-guest installer from talos.installerRepository). The NodeGroup
+           schema has no additionalProperties:false, so without this omit every one
+           of these keys passes through verbatim. Documented NodeGroup fields plus
+           tolerated extras (e.g. maxUnhealthy) still flow through unchanged. */}}
+    {{- with omit $group "cluster" "clusterReleaseName" "talos" "version" "images" }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
   valuesFrom:
