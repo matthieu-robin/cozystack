@@ -4,9 +4,9 @@ cloudnative-pg:
   # The vendored chart is 0.29.0 (appVersion 1.30.0), pulled directly by `make update`.
   # The operator image and its CRDs both come from that published chart, so they are
   # aligned by construction - there is no patch step. (This replaced
-  # patches/cloudnative-pg-1.28.2.patch, which hand-carried the 1.28 line to 1.28.2
-  # because upstream ships a chart only per minor .0/.1; 1.30.0 is itself a published
-  # chart, so the patch is gone.)
+  # patches/cloudnative-pg-1.28.2.patch, which hand-carried the 1.28 line to appVersion
+  # 1.28.2 because upstream published no chart for that appVersion - charts ship only per
+  # minor .0/.1; chart 0.29.0 carries appVersion 1.30.0 natively, so the patch is gone.)
   #
   # Do NOT pin image.tag here: the tag follows the chart's appVersion, so operator and CRDs stay
   # in lockstep. Pinning image.tag to a version the CRDs do not match makes the operator write
