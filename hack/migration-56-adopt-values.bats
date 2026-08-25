@@ -273,3 +273,37 @@ JSON
   unset FAKE_UNADOPTED_CM_FAIL
   rm -rf "$WORK"
 }
+
+@test "an unlabelled parent HR on the OLD inline spec.chart shape is restamped too" {
+  prep
+  # The application.kind label predates spec.chartRef, so the real unlabelled
+  # population is the pre-chartRef inline shape: spec.chart.spec.chart="kubernetes"
+  # from the cozystack-apps HelmRepository, no chartRef, no label. Matching only
+  # chartRef would miss every one of these and let their workers be pruned. Assert
+  # the restamp discovers the inline shape and writes the labels.
+  cat > "$FAKE_HR_LIST" <<'JSON'
+{"items":[{"metadata":{"namespace":"tenant-legacy","name":"kubernetes-old"},"spec":{"chart":{"spec":{"chart":"kubernetes","sourceRef":{"kind":"HelmRepository","name":"cozystack-apps"}}},"values":{"nodeGroups":{"md0":{"minReplicas":0,"roles":["ingress-nginx"]}}}}}]}
+JSON
+  rc=0
+  bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
+  cat "$WORK/out"
+  [ "$rc" -eq 0 ]
+  grep -qF -- "restamping application labels on unlabelled parent tenant-legacy/kubernetes-old" "$WORK/out"
+  grep -qE 'label helmrelease kubernetes-old .*apps.cozystack.io/application.kind=Kubernetes' "$FAKE_CMDLOG"
+  grep -qE 'label helmrelease kubernetes-old .*apps.cozystack.io/application.name=old' "$FAKE_CMDLOG"
+  rm -rf "$WORK"
+}
+
+@test "a non-kubernetes app on the inline shape is NOT restamped (chart-name exact match)" {
+  prep
+  # A different app on the old inline shape (chart != "kubernetes") must not be
+  # mislabelled as a Kubernetes application by the restamp.
+  cat > "$FAKE_HR_LIST" <<'JSON'
+{"items":[{"metadata":{"namespace":"tenant-legacy","name":"kubernetes-decoy"},"spec":{"chart":{"spec":{"chart":"postgres","sourceRef":{"kind":"HelmRepository","name":"cozystack-apps"}}},"values":{}}}]}
+JSON
+  rc=0
+  bash "$MIG" >"$WORK/out" 2>&1 || rc=$?
+  [ "$rc" -eq 0 ]
+  ! grep -qE 'label helmrelease kubernetes-decoy' "$FAKE_CMDLOG"
+  rm -rf "$WORK"
+}

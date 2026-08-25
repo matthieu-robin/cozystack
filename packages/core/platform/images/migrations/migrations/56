@@ -85,6 +85,14 @@ set -euo pipefail
 
 CHILD_CHART_REF_NAME="cozystack-kubernetes-nodes-application-kubevirt-kubernetes-nodes"
 PARENT_CHART_REF_NAME="cozystack-kubernetes-application-kubevirt-kubernetes"
+# Older parents (created before cozystack-api moved to spec.chartRef, 43da779ee
+# 2026-01-14) carry an inline spec.chart instead: spec.chart.spec.chart is the
+# chart name "kubernetes" sourced from the cozystack-apps HelmRepository
+# (kubernetes-rd release.chart before 8e9c0dd5a). The application.kind label
+# predates chartRef (fdca49838 2025-12-19), so the unlabelled parents the restamp
+# below exists to catch are exactly this inline-chart shape -- matching only
+# chartRef would miss every one of them. Discover both shapes.
+PARENT_INLINE_CHART_NAME="kubernetes"
 
 # Durable record of pools that were pinned prune-proof but NOT adopted (every
 # warn+pin+skip branch below). These warnings otherwise live only in this Job's
@@ -291,23 +299,27 @@ pin_cluster_pools() {
 # the migration would report success and stamp 57, and the parent's
 # control-plane-only re-render would prune its un-pinned workers with no pin and
 # no warning -- the exact data loss every skip branch below pins to avoid, here
-# reached by a labelling gap instead of a hostile value. The chartRef identifies a
-# kubernetes cluster release regardless of labels, so restamp the three
-# application labels on any such release FIRST, then let the sweep pick it up like
-# any other. A label write is additive and cannot corrupt a release (same
-# reasoning as pinning keep on the foreign-owner branch); it also repairs the
-# release for everything else that filters on that label (cozystack-api's List,
-# the lineage webhook), not only for this migration. Runs under set -e/pipefail,
-# so a genuine label failure aborts before the stamp and retries next upgrade.
+# reached by a labelling gap instead of a hostile value. (The chart's own
+# render-time guard fail-closes on this too, so it is not silent data loss; this
+# restamp is what lets an old cluster adopt seamlessly instead of blocking the
+# upgrade until an operator recovers it by hand.) The chart identity -- chartRef
+# for newer parents, inline spec.chart for older ones -- pins a kubernetes cluster
+# release regardless of labels, so restamp the three application labels on any
+# such release FIRST, then let the sweep pick it up like any other. A label write
+# is additive and cannot corrupt a release (same reasoning as pinning keep on the
+# foreign-owner branch); it also repairs the release for everything else that
+# filters on that label (cozystack-api's List, the lineage webhook), not only for
+# this migration. Runs under set -e/pipefail, so a genuine label failure aborts
+# before the stamp and retries next upgrade.
 kubectl get helmrelease --all-namespaces -o json |
-  jq -r --arg chart "$PARENT_CHART_REF_NAME" '.items[]
-      | select(.spec.chartRef.name == $chart)
+  jq -r --arg chart "$PARENT_CHART_REF_NAME" --arg inlinechart "$PARENT_INLINE_CHART_NAME" '.items[]
+      | select((.spec.chartRef.name == $chart) or (.spec.chart.spec.chart == $inlinechart))
       | select(.metadata.name | startswith("kubernetes-"))
       | select(.metadata.labels["apps.cozystack.io/application.kind"] != "Kubernetes")
       | "\(.metadata.namespace) \(.metadata.name)"' |
   while IFS=' ' read -r ns name; do
     [ -n "$ns" ] || continue
-    echo "restamping application labels on unlabelled parent $ns/$name (chartRef $PARENT_CHART_REF_NAME, missing apps.cozystack.io/application.kind)"
+    echo "restamping application labels on unlabelled parent $ns/$name (kubernetes chart, missing apps.cozystack.io/application.kind)"
     kubectl label helmrelease "$name" -n "$ns" --overwrite \
       apps.cozystack.io/application.kind=Kubernetes \
       apps.cozystack.io/application.group=apps.cozystack.io \
