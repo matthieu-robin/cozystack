@@ -43,7 +43,11 @@ image: ghcr.io/cozystack/cozystack/kubeovn-webhook:v1.6.0@sha256:593c324a38db594
 # ENABLE_NP: false, so a core NetworkPolicy object would be created and never
 # enforced. Set enabled: false on a cluster whose networking variant ships no
 # Cilium, where the object would have no controller to act on it.
+# The port is deliberately not configurable here. It has to agree with the
+# container port and the Service targetPort, and because the policy runs with
+# default-deny disabled, a disagreement fails open: the policy would deny a port
+# nothing serves while the real one stayed reachable, removing this control
+# without breaking anything visible. All three read one definition instead --
+# see namespace-annotation-webhook.port in templates/_helpers.tpl.
 webhookPolicy:
   enabled: true
-  # Container port the webhook serves on; matches the deployment's containerPort.
-  port: 8443
