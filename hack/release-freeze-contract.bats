@@ -437,7 +437,7 @@ closed-merged=true"
   # holding the run they have to queue behind, and one request could then evict
   # the other.
   #
-  # Pinned as the literal pair, not as a count of `label.name != '`. That count
+  # Pinned as the literal names, not as a count of `label.name != '`. That count
   # measures the operator and says nothing about the operands, so renaming one
   # name here and not in `prepare` — the half-finished rename — left it at two
   # and stayed green, while a real `backport-previous` event took the `-label`
@@ -449,16 +449,25 @@ closed-merged=true"
   # EVERY event takes the suffix. A constant suffix is exactly as vacuous as no
   # split at all. Every operand here was pinned before this line existed; the
   # operator joining them was not.
-  printf '%s\n' "$line" | grep -qF "github.event.action == 'labeled' && github.event.label.name != 'backport' && github.event.label.name != 'backport-previous'"
+  #
+  # TRANSITIONAL: four names, not the original pair, because backport.yaml
+  # accepts both spellings while the org-level dosubot still applies the legacy
+  # ones. The namespaced names are genuine backport requests, so they belong on
+  # this side of the split exactly as the legacy ones do — routing them aside
+  # would hand a `kind/backport` event its own group and let it cherry-pick
+  # alongside the merge run, which is the failure the pin above describes. When
+  # dosubot's PR labelling is switched off and backport.yaml drops its legacy
+  # arms, this literal and the count below go back to the pair.
+  printf '%s\n' "$line" | grep -qF "github.event.action == 'labeled' && github.event.label.name != 'backport' && github.event.label.name != 'backport-previous' && github.event.label.name != 'kind/backport' && github.event.label.name != 'kind/backport-previous'"
 
-  # And exactly two of them. The literal above is a substring check, so appending
-  # a third exclusion satisfies it unchanged — and a third exclusion is not
+  # And exactly four of them. The literal above is a substring check, so appending
+  # a fifth exclusion satisfies it unchanged — and a fifth exclusion is not
   # cosmetic: the named label stops being routed aside, lands in the main group,
   # takes its single pending slot, skips in `prepare`, and evicts a genuine
   # backport request while delivering nothing. Same harm as widening `types:`.
   # Presence and count answer different questions; this test needs both.
   count="$(printf '%s\n' "$line" | grep -o "github\.event\.label\.name != '" | wc -l | tr -d ' ')"
-  [ "${count:-0}" -eq 2 ]
+  [ "${count:-0}" -eq 4 ]
 
   # The suffix the condition selects, not only the condition. Asserting the
   # operands alone leaves the whole split deletable — collapsing the tail to
@@ -542,21 +551,27 @@ closed-merged=true"
   # ungated it re-enters this job on every later unrelated label — an automated
   # size/* or kind/* — for a merged PR still carrying `backport`, redoing a
   # backport that has already been delivered.
-  printf '%s\n' "$block" | grep -qF "(github.event.action == 'closed' && (contains(github.event.pull_request.labels.*.name, 'backport') || contains(github.event.pull_request.labels.*.name, 'backport-previous')))"
+  #
+  # TRANSITIONAL: four reads, not the original pair. backport.yaml accepts the
+  # namespaced and the legacy spelling of each label while the org-level dosubot
+  # still applies the legacy ones; when its PR labelling is switched off and the
+  # legacy arms are dropped, this literal and the count below go back to two.
+  printf '%s\n' "$block" | grep -qF "(github.event.action == 'closed' && (contains(github.event.pull_request.labels.*.name, 'backport') || contains(github.event.pull_request.labels.*.name, 'backport-previous') || contains(github.event.pull_request.labels.*.name, 'kind/backport') || contains(github.event.pull_request.labels.*.name, 'kind/backport-previous')))"
 
-  # And the guard reads that set exactly twice, both of them inside the gated
+  # And the guard reads that set exactly four times, all of them inside the gated
   # disjunct above, so it cannot be joined by an ungated one that quietly
   # restores the old behaviour while the assertion above stays green.
   #
-  # Counted as OCCURRENCES, not lines. `grep -c` counts matching lines, and both
-  # reads live on one line here, so it answers 1 and keeps answering 1 when a
-  # third read is appended to that same line — which is exactly the restoration
+  # Counted as OCCURRENCES, not lines. `grep -c` counts matching lines, and all
+  # four reads live on one line here, so it answers 1 and keeps answering 1 when a
+  # fifth read is appended to that same line — which is exactly the restoration
   # this is meant to catch. Only an append on a NEW line would have moved it.
   count="$(printf '%s\n' "$block" | grep -o 'contains(github\.event\.pull_request\.labels' | wc -l | tr -d ' ')"
-  [ "${count:-0}" -eq 2 ]
+  [ "${count:-0}" -eq 4 ]
 
-  # A label event answers for the label it carries.
-  printf '%s\n' "$block" | grep -qF "(github.event.action == 'labeled' && (github.event.label.name == 'backport' || github.event.label.name == 'backport-previous'))"
+  # A label event answers for the label it carries. Both spellings of each name,
+  # for the transitional reason given above.
+  printf '%s\n' "$block" | grep -qF "(github.event.action == 'labeled' && (github.event.label.name == 'backport' || github.event.label.name == 'backport-previous' || github.event.label.name == 'kind/backport' || github.event.label.name == 'kind/backport-previous'))"
 
   # The two conjuncts the label logic hangs off, which the label assertions above
   # would not miss. `base.ref == 'main'` is what stops the bot backporting its own
