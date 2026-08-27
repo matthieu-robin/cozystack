@@ -6,6 +6,7 @@
 #
 #   - prevlog_filter_restarted -- keep only containers with restartCount > 0;
 #   - prevlog_prioritize       -- put the failing test's namespace first;
+#   - prevlog_sort_recent      -- newest restart first, undated rows last;
 #   - prevlog_cap              -- bound the dump so a wedged cluster cannot
 #                                 explode the catch;
 #   - prevlog_logfile_name     -- per-container artifact filename.
@@ -44,6 +45,10 @@ E2E_CAPTURE_PREVLOGS_LIB=1
 . "$SCRIPT"
 
 @test "filter restarted keeps only containers whose restart count is above zero" {
+  # Deliberately fed the five-field shape, without the trailing finishedAt: the
+  # filter emits six fields either way, so the timestamp column is present and
+  # empty rather than absent. Uniform arity is what lets prevlog_sort_recent key
+  # on field 6 unconditionally.
   rows="$(printf '%s\n' \
     'tenant-test|mariadb-test-0|mariadb|container|3' \
     'tenant-test|mariadb-test-1|mariadb|container|0' \
@@ -53,8 +58,8 @@ E2E_CAPTURE_PREVLOGS_LIB=1
   out="$(printf '%s\n' "$rows" | prevlog_filter_restarted)"
 
   [ "$(printf '%s\n' "$out" | grep -c .)" -eq 2 ]
-  printf '%s\n' "$out" | grep -q '^tenant-test|mariadb-test-0|mariadb|container|3$'
-  printf '%s\n' "$out" | grep -q '^tenant-test|mariadb-test-0|init-datadir|init|2$'
+  printf '%s\n' "$out" | grep -q '^tenant-test|mariadb-test-0|mariadb|container|3|$'
+  printf '%s\n' "$out" | grep -q '^tenant-test|mariadb-test-0|init-datadir|init|2|$'
   # `! cmd` is vacuous under cozytest's `set -e` (errexit is suppressed for a
   # `!`-negated pipeline), so a filter regression that let these rows through
   # would not fail the test. Assert the absence via `if cmd; then ...; false`.
@@ -168,6 +173,102 @@ E2E_CAPTURE_PREVLOGS_LIB=1
   [ "$(printf '%s\n' "$out" | sed -n '2p' | cut -d'|' -f2)" = "tenant-test" ]
   [ "$(printf '%s\n' "$out" | sed -n '3p' | cut -d'|' -f2)" = "neighbour" ]
   [ "$(printf '%s\n' "$out" | sed -n '4p' | cut -d'|' -f2)" = "tenant-test-runner" ]
+}
+
+@test "sort_recent puts the newest previous instance first and undated rows last" {
+  # The ordering the cap is spent under. Rows 1 and 4 are the fixture that makes
+  # this bite: the oldest restart arrives first from kubectl (pods are listed by
+  # namespace, not by time) and must end up behind the newest.
+  rows="$(printf '%s\n' \
+    'cozy-kubevirt|virt-api-a|virt-api|container|1|2026-08-13T01:30:56Z' \
+    'tenant-test|mariadb-0|mariadb|container|2|' \
+    'tenant-test|postgres-0|postgres|container|4|2026-08-22T09:06:00Z' \
+    'cozy-linstor|satellite-x|linstor|container|3|2026-08-17T13:07:28Z')"
+
+  out="$(printf '%s\n' "$rows" | prevlog_sort_recent)"
+
+  # Ordering, never dropping.
+  [ "$(printf '%s\n' "$out" | grep -c .)" -eq 4 ]
+  [ "$(printf '%s\n' "$out" | sed -n '1p' | cut -d'|' -f2)" = "postgres-0" ]
+  [ "$(printf '%s\n' "$out" | sed -n '2p' | cut -d'|' -f2)" = "satellite-x" ]
+  [ "$(printf '%s\n' "$out" | sed -n '3p' | cut -d'|' -f2)" = "virt-api-a" ]
+  # A container whose lastState the kubelet has already dropped carries no
+  # timestamp. It still has a previous instance worth reading, so it sorts last
+  # rather than being filtered out.
+  [ "$(printf '%s\n' "$out" | sed -n '4p' | cut -d'|' -f2)" = "mariadb-0" ]
+}
+
+@test "sort_recent leaves simultaneous restarts in input order" {
+  # A node reboot restarts a dozen containers on the same second. Without a
+  # stable sort their order would vary between runs, and so would which of them
+  # the cap keeps -- turning a capture into something that cannot be compared
+  # against the previous run's.
+  rows="$(printf '%s\n' \
+    'ns|first|c|container|1|2026-08-17T13:07:28Z' \
+    'ns|second|c|container|1|2026-08-17T13:07:28Z' \
+    'ns|third|c|container|1|2026-08-17T13:07:28Z')"
+
+  out="$(printf '%s\n' "$rows" | prevlog_sort_recent)"
+
+  [ "$(printf '%s\n' "$out" | sed -n '1p' | cut -d'|' -f2)" = "first" ]
+  [ "$(printf '%s\n' "$out" | sed -n '2p' | cut -d'|' -f2)" = "second" ]
+  [ "$(printf '%s\n' "$out" | sed -n '3p' | cut -d'|' -f2)" = "third" ]
+}
+
+@test "sort_recent is a no-op on rows that carry no timestamp field" {
+  # Every row ties, so the stable sort must return the input untouched. This is
+  # what lets the five-field fixtures elsewhere in this file keep asserting
+  # input order through prevlog_prioritize.
+  rows="$(printf '%s\n' \
+    'ns|p1|c|container|1' \
+    'ns|p2|c|container|1' \
+    'ns|p3|c|container|1')"
+
+  out="$(printf '%s\n' "$rows" | prevlog_sort_recent)"
+
+  [ "$out" = "$rows" ]
+}
+
+@test "prioritize ranks namespace above recency" {
+  # Both keys in tension on purpose: the freshest restart in the cluster is in
+  # another namespace, and the failing test's own namespace holds only an older
+  # one. Namespace has to win -- a stale restart in the namespace under test is
+  # likelier to explain the failure than a fresh one somewhere unrelated -- and
+  # recency has to order within each group rather than across them.
+  rows="$(printf '%s\n' \
+    'cozy-kubevirt|virt-api|virt-api|container|1|2026-08-27T10:00:00Z' \
+    'tenant-test|mariadb-0|mariadb|container|1|2026-08-13T01:00:00Z' \
+    'cozy-linstor|satellite|linstor|container|1|2026-08-20T10:00:00Z' \
+    'tenant-test|postgres-0|postgres|container|1|2026-08-14T01:00:00Z')"
+
+  out="$(printf '%s\n' "$rows" | prevlog_prioritize tenant-test)"
+
+  [ "$(printf '%s\n' "$out" | grep -c .)" -eq 4 ]
+  # The test's namespace first, newest of the two leading it.
+  [ "$(printf '%s\n' "$out" | sed -n '1p' | cut -d'|' -f2)" = "postgres-0" ]
+  [ "$(printf '%s\n' "$out" | sed -n '2p' | cut -d'|' -f2)" = "mariadb-0" ]
+  # Then everything else, also newest first.
+  [ "$(printf '%s\n' "$out" | sed -n '3p' | cut -d'|' -f2)" = "virt-api" ]
+  [ "$(printf '%s\n' "$out" | sed -n '4p' | cut -d'|' -f2)" = "satellite" ]
+}
+
+@test "filter_restarted carries the restart timestamp through" {
+  # The field the ordering depends on. It also has to be READ rather than left
+  # to fall into $restarts as trailing text: `read -r ... restarts` without a
+  # sixth variable folds the timestamp into the count, which reaches the dump
+  # header as `restarts=1|2026-08-22T09:06:00Z`.
+  rows="$(printf '%s\n' \
+    'ns|p1|c|container|2|2026-08-22T09:06:00Z' \
+    'ns|p2|c|container|0|2026-08-22T09:06:00Z' \
+    'ns|p3|c|container|1|')"
+
+  out="$(printf '%s\n' "$rows" | prevlog_filter_restarted)"
+
+  # p2 never restarted, so it is dropped regardless of its timestamp.
+  [ "$(printf '%s\n' "$out" | grep -c .)" -eq 2 ]
+  [ "$(printf '%s\n' "$out" | sed -n '1p')" = 'ns|p1|c|container|2|2026-08-22T09:06:00Z' ]
+  [ "$(printf '%s\n' "$out" | sed -n '2p' | cut -d'|' -f5)" = "1" ]
+  [ "$(printf '%s\n' "$out" | sed -n '2p' | cut -d'|' -f6)" = "" ]
 }
 
 @test "cap keeps at most the requested number of rows" {
