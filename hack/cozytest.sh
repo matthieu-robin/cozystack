@@ -9,6 +9,23 @@ TEST_FILE=${1:?Usage: ./cozytest.sh <file.bats> [pattern]}
 PATTERN=${2:-*}
 LINE='----------------------------------------------------------------'
 
+# Live per-line streaming of each test's xtrace and command output, prefixed
+# ┊[mm:ss]. Default on, because for a long e2e suite that stream is the only
+# progress signal, and the only record at all when a step timeout or a dead
+# runner kills the job before the fail handler below can dump anything.
+#
+# Set COZYTEST_TRACE=0 to keep only the per-test ╭/╰ lines. Nothing
+# diagnostic is lost: run_one tees the raw stream to $log and a failing test
+# prints all of it from the fail handler, so quiet mode drops the output of
+# PASSING tests only -- which by definition did not establish the result. On
+# the unit lane that is a ~40x cut (1338 tests: 239k lines/15M of which 98%
+# was trace), and it is why the Makefile's bats-unit-tests target sets it.
+# A hanging test still shows up as a ╭ with no matching ╰.
+#
+# Anything other than the literal 0 leaves the stream on, so a typo fails
+# open to the verbose behaviour rather than silently swallowing a suite.
+COZYTEST_TRACE=${COZYTEST_TRACE:-1}
+
 cols() { stty size 2>/dev/null | awk '{print $2}' || echo 80; }
 if [ -t 1 ]; then
   MAXW=$(( $(cols) - 12 )); [ "$MAXW" -lt 40 ] && MAXW=70
@@ -38,6 +55,7 @@ run_one() {
     )
     printf '__RC__%s\n' "$?"
   } 2>&1 | tee "$log" | while IFS= read -r line; do
+        if [ "$COZYTEST_TRACE" = 0 ]; then continue; fi
         case "$line" in
           '__RC__'*) : ;;
           '+ '*)   cmd=${line#'+ '}
