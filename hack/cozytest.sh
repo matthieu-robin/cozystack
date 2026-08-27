@@ -14,13 +14,21 @@ LINE='----------------------------------------------------------------'
 # progress signal, and the only record at all when a step timeout or a dead
 # runner kills the job before the fail handler below can dump anything.
 #
-# Set COZYTEST_TRACE=0 to keep only the per-test ╭/╰ lines. Nothing
-# diagnostic is lost: run_one tees the raw stream to $log and a failing test
-# prints all of it from the fail handler, so quiet mode drops the output of
-# PASSING tests only -- which by definition did not establish the result. On
-# the unit lane that is a ~40x cut (1338 tests: 239k lines/15M of which 98%
-# was trace), and it is why the Makefile's bats-unit-tests target sets it.
-# A hanging test still shows up as a ╭ with no matching ╰.
+# Set COZYTEST_TRACE=0 to keep only the per-test ╭/╰ lines. For a test that
+# RETURNS, nothing diagnostic is lost: run_one tees the raw stream to $log and
+# the fail handler prints all of it, so quiet mode drops the output of passing
+# tests only -- which by definition did not establish the result. On the unit
+# lane that is a ~40x cut (1338 tests: 239k lines/15M of which 98% was trace),
+# and it is why the Makefile's bats-unit-tests target sets it.
+#
+# One exception, stated because it is the whole exposure quiet mode adds: the
+# fail handler runs only after the pipeline returns, and there is no INT/TERM
+# trap here, so a test killed rather than failed -- a hang reaped by the job's
+# timeout-minutes, a SIGKILLed process group -- never dumps $log at all. The
+# ╭ with no matching ╰ still names which test was in flight, but under quiet
+# mode its trace is gone rather than already printed. A trap that flushed the
+# tail of $log would close this; until then the escape hatch is re-running that
+# suite with COZYTEST_TRACE=1, which for the unit lane costs 48s and no cluster.
 #
 # Anything other than the literal 0 leaves the stream on, so a typo fails
 # open to the verbose behaviour rather than silently swallowing a suite.

@@ -36,7 +36,8 @@
 # Ordering, where the cap binds: the failing test's namespace first, and within
 # each namespace group the most recent restart first (prevlog_sort_recent). The
 # restarts alive on a cluster at any moment span days, and the install-time ones
-# have a head start on every app suite that runs afterwards, so without a time
+# install-time restarts have a head start on every app suite that runs
+# afterwards, so without a time
 # key the cap was routinely spent on containers that had already stopped
 # restarting before the failing test began. Nothing is dropped for being old --
 # an install-time restart is the explanation when the install is what broke.
@@ -108,7 +109,7 @@ prevlog_filter_restarted() {
 # once during cluster bring-up competed on equal footing with one that
 # crash-looped during the test -- and won whenever the list happened to reach it
 # first. Measured on a live stand, the restarts present at any moment span days
-# (a nine-day spread, measured on a development cluster), and in CI the restarts
+# (a nine-day spread, measured on a development cluster), and in CI the
 # are the ones with a head start: they exist before the first app suite runs, so
 # every failed test afterwards pays for them. A restart that finished before the
 # test began cannot explain the test's failure.
@@ -127,7 +128,37 @@ prevlog_filter_restarted() {
 # runs. Rows with no timestamp at all therefore pass through untouched, which is
 # also what keeps this a no-op for callers that pass 5-field rows.
 prevlog_sort_recent() {
-  sort -s -t'|' -k6,6r
+  # LC_ALL=C because the key is a fixed-format ASCII timestamp: collation buys
+  # nothing here and a locale that reorders punctuation could only surprise.
+  #
+  # Falls back to the input order rather than to nothing. The caller compares
+  # row counts to report the cap, so a sort that died would otherwise be
+  # indistinguishable from a cap overflow -- it would report "0 of N captured,
+  # N more not captured" and send the reader looking for a cap that never
+  # fired. Ordering is an optimisation over which dozen rows to keep; losing it
+  # must not lose the rows. `sort -s` and the per-key `r` are both extensions
+  # (GNU, BSD and busybox all carry them, which is why this is a fallback and
+  # not a reimplementation), so this is the branch a stricter POSIX sort takes.
+  # Anything in the timestamp column that is not shaped like one is treated as
+  # undated. Two reasons, and the second is why this is not redundant with the
+  # template guard above it: `<no value>` sorts ABOVE every digit, so a single
+  # such row would take the front of the queue from the newest real restart;
+  # and the header prints this field verbatim, so a non-timestamp there becomes
+  # a claim about a time nothing observed. Normalising to empty puts the row
+  # last and prints nothing, which are both already handled paths.
+  #
+  # Only when the field exists: setting $6 on a five-field row would append a
+  # separator and change its shape. The pattern is spelled out character by
+  # character rather than with an interval like {4}, which older mawk does not
+  # support and Ubuntu's default awk is mawk.
+  _psr_rows=$(awk -F'|' -v OFS='|' \
+    '{ if (NF >= 6 && $6 !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T/) $6 = ""; print }')
+  if _psr_out=$(printf '%s\n' "$_psr_rows" | LC_ALL=C sort -s -t'|' -k6,6r 2>/dev/null); then
+    printf '%s\n' "$_psr_out"
+  else
+    echo "[capture-previous-logs] sort unavailable for recency ordering; keeping discovery order" >&2
+    printf '%s\n' "$_psr_rows"
+  fi
 }
 
 # prevlog_prioritize: stdin = filtered rows, $1 = the failing test's namespace.
@@ -382,6 +413,19 @@ if ! command -v kubectl >/dev/null 2>&1; then
   exit 0
 fi
 
+# The finishedAt guard is three deep, and the innermost one is the load-bearing
+# one: `finishedAt` is a metav1.Time behind `json:",omitempty"`, which cannot
+# omit a struct, and its zero value marshals to `null`. The kubelet does
+# synthesize a terminated state with no time -- ContainerStatusUnknown on a pod
+# deleted mid-run, which also bumps restartCount and so clears the filter above.
+# kubectl renders that leaf as the literal string `<no value>`, and `<` sorts
+# ABOVE every digit, so under the reverse sort that row would land FIRST and
+# displace the most recent real restart: the exact inversion this ordering
+# exists to prevent. It would also print `previous instance ended <no value>`,
+# a claim about a time nothing observed. Guarding the leaf collapses both
+# shapes -- null, and the key absent -- into the empty-timestamp path that
+# sorts last. Covered by the `<no value>` cases in hack/capture-previous-logs.bats.
+#
 # One cluster-wide list call. Both initContainerStatuses and containerStatuses
 # are walked: an interrupted bootstrap that leaves the datadir half-written
 # lives in an init container, and that is exactly the instance whose log gets
@@ -399,10 +443,10 @@ if ROWS=$($PREVLOG_LIST_BOUND kubectl get pods --all-namespaces -o go-template='
 {{- $ns := .metadata.namespace -}}
 {{- $pod := .metadata.name -}}
 {{- range .status.initContainerStatuses -}}
-{{ $ns }}|{{ $pod }}|{{ .name }}|init|{{ .restartCount }}|{{ if .lastState }}{{ if .lastState.terminated }}{{ .lastState.terminated.finishedAt }}{{ end }}{{ end }}
+{{ $ns }}|{{ $pod }}|{{ .name }}|init|{{ .restartCount }}|{{ if .lastState }}{{ if .lastState.terminated }}{{ if .lastState.terminated.finishedAt }}{{ .lastState.terminated.finishedAt }}{{ end }}{{ end }}{{ end }}
 {{ end -}}
 {{- range .status.containerStatuses -}}
-{{ $ns }}|{{ $pod }}|{{ .name }}|container|{{ .restartCount }}|{{ if .lastState }}{{ if .lastState.terminated }}{{ .lastState.terminated.finishedAt }}{{ end }}{{ end }}
+{{ $ns }}|{{ $pod }}|{{ .name }}|container|{{ .restartCount }}|{{ if .lastState }}{{ if .lastState.terminated }}{{ if .lastState.terminated.finishedAt }}{{ .lastState.terminated.finishedAt }}{{ end }}{{ end }}{{ end }}
 {{ end -}}
 {{- end -}}' 2>"${LIST_ERR:-/dev/null}"); then
   LIST_RC=0

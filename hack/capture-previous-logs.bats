@@ -203,26 +203,32 @@ E2E_CAPTURE_PREVLOGS_LIB=1
   # stable sort their order would vary between runs, and so would which of them
   # the cap keeps -- turning a capture into something that cannot be compared
   # against the previous run's.
+  #
+  # Fixture deliberately in DESCENDING name order. An ascending one (first,
+  # second, third) is reproduced by sort's last-resort whole-line comparison
+  # with no -s at all, so the test would pass on a platform that ignores -s --
+  # which is the only platform it exists to catch.
   rows="$(printf '%s\n' \
-    'ns|first|c|container|1|2026-08-17T13:07:28Z' \
-    'ns|second|c|container|1|2026-08-17T13:07:28Z' \
-    'ns|third|c|container|1|2026-08-17T13:07:28Z')"
+    'ns|zeta|c|container|1|2026-08-17T13:07:28Z' \
+    'ns|mu|c|container|1|2026-08-17T13:07:28Z' \
+    'ns|alpha|c|container|1|2026-08-17T13:07:28Z')"
 
   out="$(printf '%s\n' "$rows" | prevlog_sort_recent)"
 
-  [ "$(printf '%s\n' "$out" | sed -n '1p' | cut -d'|' -f2)" = "first" ]
-  [ "$(printf '%s\n' "$out" | sed -n '2p' | cut -d'|' -f2)" = "second" ]
-  [ "$(printf '%s\n' "$out" | sed -n '3p' | cut -d'|' -f2)" = "third" ]
+  [ "$(printf '%s\n' "$out" | sed -n '1p' | cut -d'|' -f2)" = "zeta" ]
+  [ "$(printf '%s\n' "$out" | sed -n '2p' | cut -d'|' -f2)" = "mu" ]
+  [ "$(printf '%s\n' "$out" | sed -n '3p' | cut -d'|' -f2)" = "alpha" ]
 }
 
 @test "sort_recent is a no-op on rows that carry no timestamp field" {
   # Every row ties, so the stable sort must return the input untouched. This is
   # what lets the five-field fixtures elsewhere in this file keep asserting
   # input order through prevlog_prioritize.
+  # Descending, for the same reason as the fixture above.
   rows="$(printf '%s\n' \
-    'ns|p1|c|container|1' \
+    'ns|p3|c|container|1' \
     'ns|p2|c|container|1' \
-    'ns|p3|c|container|1')"
+    'ns|p1|c|container|1')"
 
   out="$(printf '%s\n' "$rows" | prevlog_sort_recent)"
 
@@ -269,6 +275,69 @@ E2E_CAPTURE_PREVLOGS_LIB=1
   [ "$(printf '%s\n' "$out" | sed -n '1p')" = 'ns|p1|c|container|2|2026-08-22T09:06:00Z' ]
   [ "$(printf '%s\n' "$out" | sed -n '2p' | cut -d'|' -f5)" = "1" ]
   [ "$(printf '%s\n' "$out" | sed -n '2p' | cut -d'|' -f6)" = "" ]
+}
+
+@test "a no value timestamp sorts last instead of jumping the queue" {
+  # kubectl renders a missing template leaf as the literal string `<no value>`,
+  # and `<` (0x3C) sorts ABOVE every digit, so under a reverse sort such a row
+  # lands FIRST and displaces the most recent real restart -- inverting the one
+  # thing this ordering exists to do. The template now guards the leaf so the
+  # string cannot be produced; this pins the row-level behaviour too, so the
+  # ordering is still defensible if some other producer ever emits it.
+  rows="$(printf '%s\n' \
+    'ns|undated|c|container|1|<no value>' \
+    'tenant-test|newest|c|container|4|2026-08-22T09:06:00Z' \
+    'tenant-test|older|c|container|1|2026-08-13T01:30:56Z')"
+
+  out="$(printf '%s\n' "$rows" | prevlog_sort_recent)"
+
+  first=$(printf '%s\n' "$out" | sed -n '1p' | cut -d'|' -f2)
+  if [ "$first" != "newest" ]; then
+    echo "FAIL: expected the newest real restart first, got '$first'"
+    printf '%s\n' "$out"
+    false
+  fi
+  [ "$(printf '%s\n' "$out" | sed -n '3p' | cut -d'|' -f2)" = "undated" ]
+}
+
+@test "the pod template guards the timestamp leaf and not only its parents" {
+  # The stub-driven tests below inject rows directly and so never execute the
+  # go-template, which is exactly how the `<no value>` shape reached a live job
+  # log unnoticed. Assert the guard's shape in the script text instead: two
+  # levels (lastState, terminated) leave the leaf ungarded, and `finishedAt` is
+  # a metav1.Time whose zero value marshals to null, which the kubelet does
+  # produce (ContainerStatusUnknown, which also bumps restartCount).
+  guarded=$(grep -c 'if .lastState.terminated.finishedAt }}{{ .lastState.terminated.finishedAt }}' "$SCRIPT")
+  # One for initContainerStatuses, one for containerStatuses.
+  if [ "$guarded" -ne 2 ]; then
+    echo "FAIL: expected 2 leaf-guarded finishedAt references in the template, found $guarded"
+    grep -n 'finishedAt' "$SCRIPT"
+    false
+  fi
+}
+
+@test "the dump header names when the previous instance ended" {
+  # The whole-script path: every other integration test here feeds five-field
+  # rows, so the sixth field reached the header with no coverage at all, and
+  # deleting it from the consumer loop's `read` left this suite green while the
+  # header printed `restarts=1|2026-08-22T09:06:00Z`.
+  tmp="$(mktemp -d)"
+  stub="$tmp/bin"; mkdir -p "$stub"; prevlog_stub_dir "$stub"
+  out="$tmp/previous-logs"
+  rows='tenant-test|db-0|postgres|container|4|2026-08-22T09:06:00Z'
+
+  PATH="$stub:$PATH" PREVLOG_STUB_ROWS="$rows" \
+    sh "$SCRIPT" "$out" tenant-test >"$tmp/stdout" 2>&1
+
+  grep -q 'restarts=4, previous instance ended 2026-08-22T09:06:00Z' "$tmp/stdout"
+  # The count must not have absorbed the timestamp, which is the shape the
+  # missing read variable produced.
+  if grep -q 'restarts=4|' "$tmp/stdout"; then
+    echo "FAIL: the timestamp was folded into the restart count"
+    grep 'previous logs:' "$tmp/stdout"
+    false
+  fi
+  rm -rf "$tmp"
 }
 
 @test "cap keeps at most the requested number of rows" {

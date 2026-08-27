@@ -163,7 +163,10 @@ BATS_UNIT_FILES := $(filter-out hack/e2e-%.bats,$(wildcard hack/*.bats))
 # Quiet by default: cozytest.sh streams every test's xtrace live, which over
 # this many suites buried the one failing assertion under ~240k lines of
 # trace in CI. COZYTEST_TRACE=0 keeps the per-test ╭/╰ lines and still dumps
-# the full trace of whichever test fails. Override to watch a run line by
+# the full trace of whichever test FAILS -- but not of one that is killed
+# instead, a hang reaped by the job timeout among them, since the dump runs
+# after the test returns. See the COZYTEST_TRACE comment in hack/cozytest.sh.
+# Override to watch a run line by
 # line: `COZYTEST_TRACE=1 make bats-unit-tests`, or invoke the runner
 # directly (`hack/cozytest.sh hack/foo.bats [pattern]`), which stays verbose.
 # The e2e call sites in packages/core/testing/Makefile are untouched and keep

@@ -173,8 +173,13 @@ count_trace_lines() {
 @test "the e2e recipes do not silence their runner" {
   # The other half of the design, and the half a well-meaning cleanup would
   # break by making the two lanes consistent with each other.
+  # Matches an ASSIGNMENT, not any mention: documenting this design in a comment
+  # over there is expected and must not turn the guard red. The recipes are
+  # `docker exec ... sh -c '...'`, which does not carry host env either, so the
+  # variable structurally cannot reach those suites today -- this pins the
+  # recipe text so a future rewrite that does export it is caught.
   e2e_mk="$REPO_ROOT/packages/core/testing/Makefile"
-  if grep -n 'COZYTEST_TRACE' "$e2e_mk"; then
+  if grep -nE '^[^#]*COZYTEST_TRACE[[:space:]]*[:?+]?=' "$e2e_mk"; then
     echo "an e2e recipe now sets COZYTEST_TRACE; those suites need the live stream"
     exit 1
   fi
