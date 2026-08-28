@@ -10,11 +10,11 @@ PATTERN=${2:-*}
 LINE='----------------------------------------------------------------'
 
 # Live per-line streaming of each test's xtrace and command output, prefixed
-# ┊[mm:ss]. Default on, because for a long e2e suite that stream is the only
-# progress signal, and the only record at all when a step timeout or a dead
+# with a timestamp. Default on, because for a long e2e suite that stream is the
+# only progress signal, and the only record at all when a step timeout or a dead
 # runner kills the job before the fail handler below can dump anything.
 #
-# Set COZYTEST_TRACE=0 to keep only the per-test ╭/╰ lines. For a test that
+# Set COZYTEST_TRACE=0 to keep only the per-test start/end lines. For a test that
 # RETURNS, nothing diagnostic is lost: run_one tees the raw stream to $log and
 # the fail handler prints all of it, so quiet mode drops the output of passing
 # tests only -- which by definition did not establish the result. On the unit
@@ -25,8 +25,8 @@ LINE='----------------------------------------------------------------'
 # fail handler runs only after the pipeline returns, and there is no INT/TERM
 # trap here, so a test killed rather than failed -- a hang reaped by the job's
 # timeout-minutes, a SIGKILLed process group -- never dumps $log at all. The
-# ╭ with no matching ╰ still names which test was in flight, but under quiet
-# mode its trace is gone rather than already printed.
+# A start line with no matching end still names which test was in flight, but
+# under quiet mode its trace is gone rather than already printed.
 #
 # An INT/TERM trap that flushed the tail of $log is the obvious repair and it
 # does not work -- built, measured, reverted. POSIX sh defers a trap until the

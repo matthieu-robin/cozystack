@@ -39,18 +39,14 @@ REPO_ROOT="$(cd "$HACK_DIR/.." && pwd)"
 # lets the quiet-mode test below tell those routes apart.
 MARKER='cozytest-trace-switch-fixture-marker'
 
-# The trace prefix run_one puts on every streamed line.
-TRACE_GLYPH='┊'
-
-# $1 = fixture basename, $2 = `pass` or `fail`. A failing fixture is the default
-# case here: the dump under test only exists on the failure path.
+# $1 = `pass` or `fail`. The failing fixture exercises the dump path under test.
 #
 # Named without an e2e- prefix on purpose. That prefix is what arms the runner's
 # cluster captures (hack/cozytest-capture-gate.bats owns that gate), and a
 # fixture that tripped them would spend the capture timeouts on every test here.
 make_fixture() {
   _dir=$(mktemp -d)
-  if [ "$2" = pass ]; then
+  if [ "$1" = pass ]; then
     printf '@test "fixture that passes and prints the marker" {\n  echo %s\n}\n' \
       "$MARKER" >"$_dir/trace-fixture.bats"
   else
@@ -80,17 +76,20 @@ run_fixture() {
   fi
 }
 
-count_trace_lines() {
-  grep -cF "$TRACE_GLYPH" "$1" || true
+count_streamed_marker_lines() {
+  # A live line has a [mm:ss] timestamp; the failure dump has the same marker
+  # without one. Keep the pattern ASCII-only so tracing this assertion does not
+  # put the runner's decorative UTF-8 prefix into its own raw log.
+  grep -cE '[[][0-9][0-9]:[0-9][0-9][]].*cozytest-trace-switch-fixture-marker' "$1" || true
 }
 
 @test "quiet mode streams no trace for a suite whose tests pass" {
-  dir=$(make_fixture trace-fixture.bats pass)
+  dir=$(make_fixture pass)
   run_fixture "$dir" 0
   # Positive control first: the test has to have run, or the absence below is
   # satisfied by an empty output.
   grep -qF 'Test OK' "$dir/out"
-  n=$(count_trace_lines "$dir/out")
+  n=$(count_streamed_marker_lines "$dir/out")
   # Spelled as an if rather than `! grep`: `set -e` is specified to ignore a
   # command whose status is inverted with `!`, which would make the assertion
   # vacuous -- the exact shape this suite exists to catch elsewhere.
@@ -108,10 +107,10 @@ count_trace_lines() {
   # variable, and for a long suite that stream is the only progress signal, and
   # the only record at all when a step timeout kills the job before the fail
   # handler can run. Flipping the default silently takes that away.
-  dir=$(make_fixture trace-fixture.bats pass)
+  dir=$(make_fixture pass)
   run_fixture "$dir" ''
   grep -qF 'Test OK' "$dir/out"
-  n=$(count_trace_lines "$dir/out")
+  n=$(count_streamed_marker_lines "$dir/out")
   if [ "$n" -eq 0 ]; then
     echo "the default is no longer verbose; e2e lost its live stream"
     cat "$dir/out"
@@ -123,14 +122,14 @@ count_trace_lines() {
 @test "a failing test still dumps its whole trace when the stream is quiet" {
   # The load-bearing invariant. Quiet mode is only defensible because this dump
   # survives it, and nothing else in the tree exercises the failure path.
-  dir=$(make_fixture trace-fixture.bats fail)
+  dir=$(make_fixture fail)
   run_fixture "$dir" 0
   grep -qF 'Test failed' "$dir/out"
   grep -qF 'captured output' "$dir/out"
   # The marker reaches the log by two routes and quiet mode closes one of them,
-  # so with zero trace lines present its appearance can only have come from the
+  # so with no streamed copy present its appearance can only have come from the
   # dump. That pairing is the assertion; either half alone is weaker.
-  n=$(count_trace_lines "$dir/out")
+  n=$(count_streamed_marker_lines "$dir/out")
   if [ "$n" -ne 0 ]; then
     echo "expected no live trace in quiet mode, got $n line(s)"
     exit 1
@@ -143,7 +142,7 @@ count_trace_lines() {
 }
 
 @test "quiet mode still fails the run when a test fails" {
-  dir=$(make_fixture trace-fixture.bats fail)
+  dir=$(make_fixture fail)
   COZYTEST_TRACE=0 "$RUNNER" "$dir/trace-fixture.bats" >"$dir/out" 2>&1 && rc=0 || rc=$?
   if [ "$rc" -eq 0 ]; then
     echo "a failing suite exited 0 under quiet mode, so CI would go green on red"
@@ -156,10 +155,10 @@ count_trace_lines() {
   # With the stream off these two lines are the only evidence of which test is
   # in flight, which is what makes a hang diagnosable: a start with no matching
   # end names the test that never returned.
-  dir=$(make_fixture trace-fixture.bats pass)
+  dir=$(make_fixture pass)
   run_fixture "$dir" 0
-  grep -qF '╭ » Run test:' "$dir/out"
-  grep -qF '✅ Test OK' "$dir/out"
+  grep -qF 'Run test:' "$dir/out"
+  grep -qF 'Test OK:' "$dir/out"
   rm -rf "$dir"
 }
 
