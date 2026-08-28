@@ -598,6 +598,29 @@ STUB
   rm -rf "$tmp"
 }
 
+@test "an empty preferred namespace group does not consume a cap slot" {
+  tmp="$(mktemp -d)"
+  stub="$tmp/bin"; mkdir -p "$stub"; prevlog_stub_dir "$stub"
+  out="$tmp/previous-logs"
+  rows="$(printf '%s\n' \
+    'cozy-system|operator-0|operator|container|4' \
+    'cozy-linstor|satellite-0|linstor|container|3' \
+    'cozy-cilium|agent-0|cilium|container|2')"
+
+  PATH="$stub:$PATH" PREVLOG_STUB_ROWS="$rows" COZY_PREVLOG_MAX=3 \
+    sh "$SCRIPT" "$out" tenant-test >/dev/null 2>&1
+
+  # No row matches tenant-test, so the preferred group is empty. Its lack of
+  # output must not become a blank line that head counts against the cap.
+  [ "$(ls "$out" | grep -c '\.log$')" -eq 3 ]
+  if grep -q 'reached COZY_PREVLOG_MAX=3 cap' "$out/capture-notes.txt"; then
+    echo "FAIL: an empty preferred group manufactured a cap overflow"
+    cat "$out/capture-notes.txt"
+    false
+  fi
+  rm -rf "$tmp"
+}
+
 @test "a missing timeout is named as a local dependency, not as a cluster failure" {
   tmp="$(mktemp -d)"
   bin="$tmp/bin"; mkdir -p "$bin"

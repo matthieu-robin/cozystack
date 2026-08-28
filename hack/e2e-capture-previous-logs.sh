@@ -35,9 +35,8 @@
 #
 # Ordering, where the cap binds: the failing test's namespace first, and within
 # each namespace group the most recent restart first (prevlog_sort_recent). The
-# restarts alive on a cluster at any moment span days, and the install-time ones
-# install-time restarts have a head start on every app suite that runs
-# afterwards, so without a time
+# restarts alive on a cluster at any moment span days, and install-time restarts
+# have a head start on every app suite that runs afterwards, so without a time
 # key the cap was routinely spent on containers that had already stopped
 # restarting before the failing test began. Nothing is dropped for being old --
 # an install-time restart is the explanation when the install is what broke.
@@ -110,9 +109,9 @@ prevlog_filter_restarted() {
 # crash-looped during the test -- and won whenever the list happened to reach it
 # first. Measured on a live stand, the restarts present at any moment span days
 # (a nine-day spread, measured on a development cluster), and in CI the
-# are the ones with a head start: they exist before the first app suite runs, so
-# every failed test afterwards pays for them. A restart that finished before the
-# test began cannot explain the test's failure.
+# install-time restarts have that head start: they exist before the first app
+# suite runs, so every failed test afterwards pays for them. A restart that
+# finished before the test began cannot explain the test's failure.
 #
 # Ordering, not filtering, and deliberately so: an install-time restart IS the
 # explanation when the install is what broke, and this capture has no reference
@@ -153,6 +152,7 @@ prevlog_sort_recent() {
   # support and Ubuntu's default awk is mawk.
   _psr_rows=$(awk -F'|' -v OFS='|' \
     '{ if (NF >= 6 && $6 !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T/) $6 = ""; print }')
+  [ -n "$_psr_rows" ] || return 0
   if _psr_out=$(printf '%s\n' "$_psr_rows" | LC_ALL=C sort -s -t'|' -k6,6r 2>/dev/null); then
     printf '%s\n' "$_psr_out"
   else
