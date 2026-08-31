@@ -1440,3 +1440,156 @@ spec:
           apiVersion: v1
           kind: Namespace
           name: tenant-admission-churn-probe
+---
+# Companion to admission-webhooks-survive-namespace-churn above. That test
+# proves the webhooks stay AVAILABLE; this one proves they are still
+# UNREACHABLE from pods, which is the property the policies exist for, and that
+# the deny is scoped to the webhook port alone.
+#
+# The third assertion is the one that earns this test. The policies previously
+# expressed the Service-frontend deny with `toServices`, which Cilium resolves
+# only inside ALLOW rules -- leaving the deny rule with an empty L3 selector
+# that Cilium reads as a wildcard, so "deny this Service on 443" became "deny
+# EVERY destination on 443" for every selected pod. Every rendered-YAML
+# assertion in the package suites passed on that policy. Only a probe that
+# checks an unrelated 443 destination still works can tell the two apart, and
+# the ingress controller's own HTTPS port is exactly that: the same pods, the
+# same tenant egress allowances, a different port.
+#
+# Runs in tenant-root because that is where the host cluster's ingress-nginx
+# lives and where pods are permitted to reach it (allow-internal-communication),
+# so the deny is the only thing that can block the webhook port. From the
+# isolated tenant-test the probe would pass for the wrong reason.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: admission-webhook-deny-still-enforced
+spec:
+  namespace: tenant-root
+  catch:
+  - events: {}
+  steps:
+  - name: pods-cannot-reach-the-webhook-but-keep-unrelated-443-egress
+    try:
+    - script:
+        timeout: 6m
+        content: |
+          set -eu
+          ns="$NAMESPACE"
+          probe=admission-deny-probe
+          sel=app.kubernetes.io/name=ingress-nginx,app.kubernetes.io/component=controller
+
+          svcs=$(kubectl -n "$ns" get svc -l "$sel" \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+          adm=$(printf '%s\n' "$svcs" | grep -- '-admission$' | head -1 || true)
+          ctl=$(printf '%s\n' "$svcs" | grep -v -- '-admission$' | grep . | head -1 || true)
+          [ -n "$adm" ] || { echo "SETUP FAILURE: no ingress-nginx admission Service in $ns" >&2; exit 1; }
+          [ -n "$ctl" ] || { echo "SETUP FAILURE: no ingress-nginx controller Service in $ns" >&2; exit 1; }
+
+          adm_port=$(kubectl -n "$ns" get svc "$adm" -o jsonpath='{.spec.ports[0].port}')
+          ctl_port=$(kubectl -n "$ns" get svc "$ctl" -o jsonpath='{.spec.ports[?(@.name=="https")].port}')
+          [ -n "$ctl_port" ] || { echo "SETUP FAILURE: $ctl exposes no https port" >&2; exit 1; }
+
+          kubectl -n "$ns" wait --for=condition=Ready pod -l "$sel" --timeout=3m
+          pod_ip=$(kubectl -n "$ns" get pod -l "$sel" \
+            -o jsonpath='{.items[0].status.podIP}')
+          hook_port=$(kubectl -n "$ns" get pod -l "$sel" \
+            -o jsonpath='{.items[0].spec.containers[0].ports[?(@.name=="webhook")].containerPort}')
+          [ -n "$pod_ip" ] || { echo "SETUP FAILURE: no controller Pod IP in $ns" >&2; exit 1; }
+          [ -n "$hook_port" ] || { echo "SETUP FAILURE: controller declares no webhook port" >&2; exit 1; }
+
+          echo "probing from $ns: allow ${ctl}:${ctl_port}, deny ${adm}:${adm_port}, deny ${pod_ip}:${hook_port}"
+
+          kubectl -n "$ns" delete pod "$probe" --ignore-not-found --wait=true --timeout=60s
+          # busybox:musl is staged onto every node by hack/e2e-prepull-images.sh,
+          # so this adds no image pull. The securityContext satisfies the
+          # restricted PodSecurity profile, so the probe runs in a tenant
+          # namespace whatever level is enforced there.
+          kubectl -n "$ns" apply -f - <<EOF
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: ${probe}
+          spec:
+            restartPolicy: Never
+            automountServiceAccountToken: false
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 65534
+              runAsGroup: 65534
+              seccompProfile:
+                type: RuntimeDefault
+            containers:
+            - name: probe
+              image: busybox:musl
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              env:
+              - name: CTL_HOST
+                value: "${ctl}.${ns}.svc"
+              - name: CTL_PORT
+                value: "${ctl_port}"
+              - name: ADM_HOST
+                value: "${adm}.${ns}.svc"
+              - name: ADM_PORT
+                value: "${adm_port}"
+              - name: POD_IP
+                value: "${pod_ip}"
+              - name: HOOK_PORT
+                value: "${hook_port}"
+              command: ["sh", "-c"]
+              args:
+              - |
+                set -u
+                rc=0
+                reach() { nc -w 5 "\$1" "\$2" </dev/null >/dev/null 2>&1; }
+
+                if reach "\$CTL_HOST" "\$CTL_PORT"; then
+                  echo "OK   unrelated 443 egress works (\$CTL_HOST:\$CTL_PORT)"
+                else
+                  echo "BUG  unrelated 443 egress DENIED (\$CTL_HOST:\$CTL_PORT) -- the webhook deny is not scoped to the webhook port"
+                  rc=1
+                fi
+
+                if reach "\$ADM_HOST" "\$ADM_PORT"; then
+                  echo "BUG  webhook reachable through its Service ClusterIP (\$ADM_HOST:\$ADM_PORT)"
+                  rc=1
+                else
+                  echo "OK   webhook denied through its Service ClusterIP"
+                fi
+
+                if reach "\$POD_IP" "\$HOOK_PORT"; then
+                  echo "BUG  webhook reachable directly on its backend port (\$POD_IP:\$HOOK_PORT)"
+                  rc=1
+                else
+                  echo "OK   webhook denied on its backend port"
+                fi
+                exit \$rc
+          EOF
+
+          # Wait for a terminal phase rather than a condition: a Failed probe has
+          # to be read, not waited out.
+          deadline=$(( $(date +%s) + 180 ))
+          phase=""
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            phase=$(kubectl -n "$ns" get pod "$probe" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            case "$phase" in Succeeded|Failed) break ;; esac
+            sleep 3
+          done
+
+          kubectl -n "$ns" logs "$probe" 2>&1 || true
+          [ "$phase" = "Succeeded" ] || {
+            echo "probe did not pass (phase=${phase:-unknown})" >&2
+            kubectl -n "$ns" describe pod "$probe" >&2 2>&1 || true
+            exit 1
+          }
+        check:
+          ($error == null): true
+    finally:
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Pod
+          name: admission-deny-probe
