@@ -8,40 +8,57 @@ capabilities:
   apiVersions:
     - cilium.io/v2/CiliumClusterwideNetworkPolicy
 tests:
-  - it: denies pod egress through the exact webhook Service
+  - it: selects every pod endpoint as a caller
     asserts:
       - isKind:
           of: CiliumClusterwideNetworkPolicy
       - equal:
           path: specs[0].endpointSelector
           value: {}
-      - equal:
-          path: specs[0].egressDeny[0].toServices[0].k8sService.namespace
-          value: cozy-kubeovn
-      - equal:
-          path: specs[0].egressDeny[0].toServices[0].k8sService.serviceName
-          value: kube-ovn-webhook
-      - equal:
-          path: specs[0].egressDeny[0].toPorts[0].ports[0].port
-          value: "443"
 
   - it: denies direct pod egress to the exact webhook backend and port
     asserts:
       - equal:
-          path: specs[0].egressDeny[1].toEndpoints[0].matchLabels["k8s:io.kubernetes.pod.namespace"]
+          path: specs[0].egressDeny[0].toEndpoints[0].matchLabels["k8s:io.kubernetes.pod.namespace"]
           value: cozy-kubeovn
       - equal:
-          path: specs[0].egressDeny[1].toEndpoints[0].matchLabels["k8s:app.kubernetes.io/name"]
+          path: specs[0].egressDeny[0].toEndpoints[0].matchLabels["k8s:app.kubernetes.io/name"]
           value: kube-ovn-webhook
       - equal:
-          path: specs[0].egressDeny[1].toEndpoints[0].matchLabels["k8s:app.kubernetes.io/instance"]
+          path: specs[0].egressDeny[0].toEndpoints[0].matchLabels["k8s:app.kubernetes.io/instance"]
           value: kubeovn-webhook
       - equal:
-          path: specs[0].egressDeny[1].toPorts[0].ports[0].port
+          path: specs[0].egressDeny[0].toPorts[0].ports[0].port
           value: "8443"
       - equal:
-          path: specs[0].egressDeny[1].toPorts[0].ports[0].protocol
+          path: specs[0].egressDeny[0].toPorts[0].ports[0].protocol
           value: TCP
+
+  # Regression guard for the fail-open-turned-outage this policy shipped with
+  # once. Cilium resolves `toServices` only inside ALLOW rules
+  # (pkg/policy/k8s/service.go walks spec.Egress and never spec.EgressDeny), so
+  # an egressDeny whose only destination is an unresolved `toServices` reaches
+  # the datapath with a non-nil-but-empty L3 selector -- which Cilium reads as a
+  # WILDCARD whenever the rule carries toPorts
+  # (pkg/policy/types/policyentry.go). With endpointSelector {} that turns "deny
+  # this Service on 443" into "deny EVERY destination on 443 for every pod in
+  # the cluster". The rendered YAML looks correct either way, so the shape is
+  # pinned here: one deny rule per spec, and its destination must be a selector
+  # Cilium can actually resolve.
+  - it: gives every deny rule a destination selector Cilium can resolve
+    asserts:
+      - lengthEqual:
+          path: specs
+          count: 2
+      - lengthEqual:
+          path: specs[0].egressDeny
+          count: 1
+      - exists:
+          path: specs[0].egressDeny[0].toEndpoints
+      - notExists:
+          path: specs[0].egressDeny[0].toServices
+      - exists:
+          path: specs[1].ingressDeny[0].fromEntities
 
   - it: denies world ingress without a namespace-dependent caller selector
     asserts:

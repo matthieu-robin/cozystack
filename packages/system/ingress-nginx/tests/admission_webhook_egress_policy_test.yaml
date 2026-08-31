@@ -8,54 +8,68 @@ capabilities:
   apiVersions:
     - cilium.io/v2/CiliumClusterwideNetworkPolicy
 tests:
-  - it: denies pod egress through the exact admission Service
+  - it: denies direct pod egress to the exact webhook backend and port
     asserts:
       - isKind:
           of: CiliumClusterwideNetworkPolicy
       - equal:
-          path: specs[0].egressDeny[0].toServices[0].k8sService.namespace
+          path: specs[0].egressDeny[0].toEndpoints[0].matchLabels["k8s:io.kubernetes.pod.namespace"]
           value: cozy-ingress-nginx
       - equal:
-          path: specs[0].egressDeny[0].toServices[0].k8sService.serviceName
-          value: ingress-nginx-controller-admission
-      - equal:
-          path: specs[0].egressDeny[0].toPorts[0].ports[0].port
-          value: "443"
-
-  - it: denies direct pod egress to the exact webhook backend and port
-    asserts:
-      - equal:
-          path: specs[0].egressDeny[1].toEndpoints[0].matchLabels["k8s:io.kubernetes.pod.namespace"]
-          value: cozy-ingress-nginx
-      - equal:
-          path: specs[0].egressDeny[1].toEndpoints[0].matchLabels["k8s:app.kubernetes.io/name"]
+          path: specs[0].egressDeny[0].toEndpoints[0].matchLabels["k8s:app.kubernetes.io/name"]
           value: ingress-nginx
       - equal:
-          path: specs[0].egressDeny[1].toEndpoints[0].matchLabels["k8s:app.kubernetes.io/instance"]
+          path: specs[0].egressDeny[0].toEndpoints[0].matchLabels["k8s:app.kubernetes.io/instance"]
           value: ingress-nginx
       - equal:
-          path: specs[0].egressDeny[1].toEndpoints[0].matchLabels["k8s:app.kubernetes.io/component"]
+          path: specs[0].egressDeny[0].toEndpoints[0].matchLabels["k8s:app.kubernetes.io/component"]
           value: controller
       - equal:
-          path: specs[0].egressDeny[1].toPorts[0].ports[0].port
+          path: specs[0].egressDeny[0].toPorts[0].ports[0].port
           value: "8443"
       - equal:
-          path: specs[0].egressDeny[1].toPorts[0].ports[0].protocol
+          path: specs[0].egressDeny[0].toPorts[0].ports[0].protocol
           value: TCP
+
+  # Regression guard for the fail-open-turned-outage this policy shipped with
+  # once. Cilium resolves `toServices` only inside ALLOW rules
+  # (pkg/policy/k8s/service.go walks spec.Egress and never spec.EgressDeny). An
+  # egressDeny whose only destination is an unresolved `toServices` therefore
+  # reaches the datapath with a non-nil-but-empty L3 selector, and Cilium reads
+  # that as a WILDCARD whenever the rule carries toPorts
+  # (pkg/policy/types/policyentry.go) -- turning "deny this Service on 443" into
+  # "deny EVERY destination on 443" for every pod the spec selects. Nothing in
+  # the rendered YAML looks wrong, which is why the shape is asserted here
+  # rather than left to review: every deny rule must name a destination Cilium
+  # can actually resolve, and there must be exactly one per source group.
+  - it: gives every deny rule a destination selector Cilium can resolve
+    asserts:
+      - lengthEqual:
+          path: specs
+          count: 3
+      - lengthEqual:
+          path: specs[0].egressDeny
+          count: 1
+      - lengthEqual:
+          path: specs[1].egressDeny
+          count: 1
+      - exists:
+          path: specs[0].egressDeny[0].toEndpoints
+      - exists:
+          path: specs[1].egressDeny[0].toEndpoints
+      - notExists:
+          path: specs[0].egressDeny[0].toServices
+      - notExists:
+          path: specs[1].egressDeny[0].toServices
+      - exists:
+          path: specs[2].ingressDeny[0].fromEntities
+
 
   - it: applies the same destination deny to both source groups
     asserts:
       - equal:
           path: specs[1].egressDeny
           value:
-            - toServices:
-                - k8sService:
-                    namespace: cozy-ingress-nginx
-                    serviceName: ingress-nginx-controller-admission
-              toPorts:
-                - ports:
-                    - port: "443"
-                      protocol: TCP
             - toEndpoints:
                 - matchLabels:
                     k8s:io.kubernetes.pod.namespace: cozy-ingress-nginx
@@ -152,25 +166,18 @@ tests:
       ingress-nginx.nameOverride: edge-ingress
       ingress-nginx.namespaceOverride: custom-ingress
       ingress-nginx.controller.admissionWebhooks.port: 9443
-      ingress-nginx.controller.admissionWebhooks.service.servicePort: 9444
     asserts:
       - equal:
-          path: specs[0].egressDeny[0].toServices[0].k8sService.namespace
+          path: specs[0].egressDeny[0].toEndpoints[0].matchLabels["k8s:io.kubernetes.pod.namespace"]
           value: custom-ingress
       - equal:
-          path: specs[0].egressDeny[0].toServices[0].k8sService.serviceName
-          value: ingress-nginx-edge-ingress-controller-admission
-      - equal:
-          path: specs[0].egressDeny[0].toPorts[0].ports[0].port
-          value: "9444"
-      - equal:
-          path: specs[0].egressDeny[1].toEndpoints[0].matchLabels["k8s:io.kubernetes.pod.namespace"]
-          value: custom-ingress
-      - equal:
-          path: specs[0].egressDeny[1].toEndpoints[0].matchLabels["k8s:app.kubernetes.io/name"]
+          path: specs[0].egressDeny[0].toEndpoints[0].matchLabels["k8s:app.kubernetes.io/name"]
           value: edge-ingress
       - equal:
-          path: specs[0].egressDeny[1].toPorts[0].ports[0].port
+          path: specs[0].egressDeny[0].toPorts[0].ports[0].port
+          value: "9443"
+      - equal:
+          path: specs[2].ingressDeny[0].toPorts[0].ports[0].port
           value: "9443"
 
   - it: does not render when the upstream admission webhook is disabled
