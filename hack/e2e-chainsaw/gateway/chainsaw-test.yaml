@@ -1344,3 +1344,99 @@ spec:
     try:
     - apply:
         file: ingress-external-allow.yaml
+---
+# Regression for #3983. The old target-side Cilium policies selected callers
+# from every namespace, so deleting an unrelated namespace regenerated the
+# webhook endpoints' ingress policy and briefly made fail-closed admission
+# webhooks unreachable from the API server. Exercise both affected webhook
+# paths immediately after the deletion, with no retry to hide the outage.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: admission-webhooks-survive-namespace-churn
+spec:
+  catch:
+  - events: {}
+  steps:
+  - name: ingress-and-pod-admission-remain-available-after-deletion
+    try:
+    - script:
+        content: |
+          set -eu
+          ns="$NAMESPACE"
+          churn_ns=tenant-admission-churn-probe
+          apex=$(kubectl get namespace "$ns" -o jsonpath='{.metadata.labels.namespace\.cozystack\.io/host}')
+          [ -n "$apex" ] || { echo "SETUP FAILURE: $ns lacks the namespace.cozystack.io/host label" >&2; exit 1; }
+
+          # Reproduce the incident shape: create an ordinary tenant namespace
+          # carrying an admitted Ingress, delete it synchronously, then invoke
+          # the fail-closed webhooks while Cilium processes that namespace
+          # identity removal.
+          kubectl delete namespace "$churn_ns" --ignore-not-found --wait=true --timeout=60s
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: ${churn_ns}
+            labels:
+              namespace.cozystack.io/host: churn.${apex}
+          EOF
+          kubectl apply -n "$churn_ns" -f - <<EOF
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: admission-churn-source
+          spec:
+            rules:
+            - host: probe.churn.${apex}
+              http:
+                paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: noop
+                      port:
+                        number: 80
+          EOF
+          kubectl delete namespace "$churn_ns" --wait=true --timeout=60s
+
+          # ingress-nginx validating admission
+          kubectl apply --dry-run=server -n "$ns" -o name -f - <<EOF
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: admission-after-churn
+          spec:
+            rules:
+            - host: admission-after-churn.${apex}
+              http:
+                paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: noop
+                      port:
+                        number: 80
+          EOF
+
+          # kubeovn-webhook mutating admission
+          kubectl apply --dry-run=server -n "$ns" -o name -f - <<'EOF'
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: admission-after-churn
+          spec:
+            containers:
+            - name: pause
+              image: registry.k8s.io/pause:3.10
+          EOF
+        check:
+          ($error == null): true
+    finally:
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Namespace
+          name: tenant-admission-churn-probe
