@@ -1,0 +1,195 @@
+suite: ingress-nginx admission webhook exposure
+release:
+  name: ingress-nginx
+  namespace: cozy-ingress-nginx
+templates:
+  - templates/admission-webhook-egress-policy.yaml
+capabilities:
+  apiVersions:
+    - cilium.io/v2/CiliumClusterwideNetworkPolicy
+tests:
+  - it: denies pod egress through the exact admission Service
+    asserts:
+      - isKind:
+          of: CiliumClusterwideNetworkPolicy
+      - equal:
+          path: specs[0].egressDeny[0].toServices[0].k8sService.namespace
+          value: cozy-ingress-nginx
+      - equal:
+          path: specs[0].egressDeny[0].toServices[0].k8sService.serviceName
+          value: ingress-nginx-controller-admission
+      - equal:
+          path: specs[0].egressDeny[0].toPorts[0].ports[0].port
+          value: "443"
+
+  - it: denies direct pod egress to the exact webhook backend and port
+    asserts:
+      - equal:
+          path: specs[0].egressDeny[1].toEndpoints[0].matchLabels["k8s:io.kubernetes.pod.namespace"]
+          value: cozy-ingress-nginx
+      - equal:
+          path: specs[0].egressDeny[1].toEndpoints[0].matchLabels["k8s:app.kubernetes.io/name"]
+          value: ingress-nginx
+      - equal:
+          path: specs[0].egressDeny[1].toEndpoints[0].matchLabels["k8s:app.kubernetes.io/instance"]
+          value: ingress-nginx
+      - equal:
+          path: specs[0].egressDeny[1].toEndpoints[0].matchLabels["k8s:app.kubernetes.io/component"]
+          value: controller
+      - equal:
+          path: specs[0].egressDeny[1].toPorts[0].ports[0].port
+          value: "8443"
+      - equal:
+          path: specs[0].egressDeny[1].toPorts[0].ports[0].protocol
+          value: TCP
+
+  - it: applies the same destination deny to both source groups
+    asserts:
+      - equal:
+          path: specs[1].egressDeny
+          value:
+            - toServices:
+                - k8sService:
+                    namespace: cozy-ingress-nginx
+                    serviceName: ingress-nginx-controller-admission
+              toPorts:
+                - ports:
+                    - port: "443"
+                      protocol: TCP
+            - toEndpoints:
+                - matchLabels:
+                    k8s:io.kubernetes.pod.namespace: cozy-ingress-nginx
+                    k8s:app.kubernetes.io/name: ingress-nginx
+                    k8s:app.kubernetes.io/instance: ingress-nginx
+                    k8s:app.kubernetes.io/component: controller
+              toPorts:
+                - ports:
+                    - port: "8443"
+                      protocol: TCP
+
+  - it: covers all non-system pods without a forgeable label exemption
+    asserts:
+      - equal:
+          path: specs[0].endpointSelector.matchExpressions
+          value:
+            - key: k8s:io.kubernetes.pod.namespace
+              operator: NotIn
+              values:
+                - kube-system
+
+  - it: exempts only the konnectivity-agent ServiceAccount in kube-system
+    asserts:
+      - contains:
+          path: specs[1].endpointSelector.matchExpressions
+          content:
+            key: k8s:io.kubernetes.pod.namespace
+            operator: In
+            values:
+              - kube-system
+      - contains:
+          path: specs[1].endpointSelector.matchExpressions
+          content:
+            key: io.cilium.k8s.policy.serviceaccount
+            operator: NotIn
+            values:
+              - konnectivity-agent
+      - lengthEqual:
+          path: specs[1].endpointSelector.matchExpressions
+          count: 2
+
+  - it: denies world ingress without a namespace-dependent caller selector
+    asserts:
+      - equal:
+          path: specs[2].endpointSelector.matchLabels
+          value:
+            k8s:io.kubernetes.pod.namespace: cozy-ingress-nginx
+            k8s:app.kubernetes.io/name: ingress-nginx
+            k8s:app.kubernetes.io/instance: ingress-nginx
+            k8s:app.kubernetes.io/component: controller
+      - contains:
+          path: specs[2].ingressDeny[0].fromEntities
+          content: world
+      - equal:
+          path: specs[2].ingressDeny[0].toPorts[0].ports[0].port
+          value: "8443"
+      - notExists:
+          path: specs[2].endpointSelector.matchExpressions
+
+  - it: does not enable default deny on source or target endpoints
+    asserts:
+      - equal:
+          path: specs[0].enableDefaultDeny
+          value:
+            ingress: false
+            egress: false
+      - equal:
+          path: specs[1].enableDefaultDeny
+          value:
+            ingress: false
+            egress: false
+      - equal:
+          path: specs[2].enableDefaultDeny
+          value:
+            ingress: false
+            egress: false
+      - notExists:
+          path: specs[0].ingress
+      - notExists:
+          path: specs[0].ingressDeny
+      - notExists:
+          path: specs[0].egress
+
+  - it: gives each release a cluster-scoped collision-safe name
+    asserts:
+      - matchRegex:
+          path: metadata.name
+          pattern: ^ingress-nginx-admission-webhook-[a-f0-9]{12}$
+      - notExists:
+          path: metadata.namespace
+
+  - it: follows upstream name namespace and webhook port overrides
+    set:
+      ingress-nginx.nameOverride: edge-ingress
+      ingress-nginx.namespaceOverride: custom-ingress
+      ingress-nginx.controller.admissionWebhooks.port: 9443
+      ingress-nginx.controller.admissionWebhooks.service.servicePort: 9444
+    asserts:
+      - equal:
+          path: specs[0].egressDeny[0].toServices[0].k8sService.namespace
+          value: custom-ingress
+      - equal:
+          path: specs[0].egressDeny[0].toServices[0].k8sService.serviceName
+          value: ingress-nginx-edge-ingress-controller-admission
+      - equal:
+          path: specs[0].egressDeny[0].toPorts[0].ports[0].port
+          value: "9444"
+      - equal:
+          path: specs[0].egressDeny[1].toEndpoints[0].matchLabels["k8s:io.kubernetes.pod.namespace"]
+          value: custom-ingress
+      - equal:
+          path: specs[0].egressDeny[1].toEndpoints[0].matchLabels["k8s:app.kubernetes.io/name"]
+          value: edge-ingress
+      - equal:
+          path: specs[0].egressDeny[1].toPorts[0].ports[0].port
+          value: "9443"
+
+  - it: does not render when the upstream admission webhook is disabled
+    set:
+      ingress-nginx.controller.admissionWebhooks.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: defaults to enabled when a backport has no policy values
+    set:
+      admissionWebhookPolicy: null
+    asserts:
+      - hasDocuments:
+          count: 1
+
+  - it: can be explicitly disabled
+    set:
+      admissionWebhookPolicy.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
