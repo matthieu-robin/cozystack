@@ -43,9 +43,14 @@ image: ghcr.io/cozystack/cozystack/kubeovn-webhook:v1.6.0@sha256:593c324a38db594
 # ENABLE_NP: false, so a core NetworkPolicy object would be created and never
 # enforced. The template renders only when that Cilium API is discoverable; set
 # enabled: false to opt out explicitly.
-# Both ports are defined once: the Service frontend agrees with the source-side
-# Service deny, while the container port, Service targetPort, direct endpoint
-# deny, and target-side world deny agree on the backend. See the
-# namespace-annotation-webhook.servicePort and .port helpers.
+# The port is deliberately not configurable here. It has to agree with the
+# container port and the Service targetPort, and because the policy runs with
+# default-deny disabled, a disagreement fails open: the policy would deny a port
+# nothing serves while the real one stayed reachable, removing this control
+# without breaking anything visible. The source-side endpoint deny and the
+# target-side world deny both read that one definition -- see
+# namespace-annotation-webhook.port in templates/_helpers.tpl. Only the backend
+# port is denied; Cilium translates a service to its backends before enforcing
+# egress policy, so ClusterIP-addressed traffic is matched there too.
 webhookPolicy:
   enabled: true

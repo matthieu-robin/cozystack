@@ -8,18 +8,51 @@ and only the API server has any business calling it (GHSA-g883-q79m-8225).
 Client-certificate verification cannot enforce that on the stock control plane
 because the API server presents no client certificate to this webhook.
 
-This Cilium policy is source-side and deny-only. Selecting callers avoids
-coupling the webhook endpoint's ingress policy to every namespace identity:
-namespace deletion can otherwise regenerate that endpoint and transiently
-break Pod admission (#3983). enableDefaultDeny remains false, so the policy
-subtracts only the webhook destination at its frontend and backend ports from
-pod egress.
+This is a CiliumClusterwideNetworkPolicy, not a core NetworkPolicy, and the
+distinction is why it works: packages/system/kubeovn/values.yaml sets
+ENABLE_NP: false, so kube-ovn programs no ACLs and a core NetworkPolicy would
+be created and never enforced. Cilium enforces its own policies regardless.
 
-The API server and host-network workloads are not selected as pod endpoints.
-This component exists only on the management cluster, so unlike ingress-nginx
-there is no konnectivity-tunnelled caller to exempt. A second, target-side rule
-keeps the external-world deny; its static entity selector does not depend on
-namespace identities and therefore does not recreate the churn failure mode.
+The policy is source-side and deny-only. Selecting callers avoids coupling the
+webhook endpoint's ingress policy to every namespace identity, where every
+namespace create or delete recomputes a selector attached to a fail-closed
+endpoint. That coupling is structural and is removed here; it was not
+reproduced in isolation as the trigger of #3983, and the world deny below --
+the other candidate named in that issue -- is retained on the evidence quoted
+further down. enableDefaultDeny stays false, so the policy subtracts one
+destination and port from pod egress and leaves everything else exactly as it
+was.
+
+Only the BACKEND port is denied, and that is sufficient. Cilium translates a
+service to its backends BEFORE egress policy is enforced, so a pod dialling
+this webhook's ClusterIP:443 is matched against the backend identity on the
+port below. Do not add a `toServices` rule to cover the ClusterIP explicitly:
+Cilium resolves `toServices` only inside ALLOW rules
+(pkg/policy/k8s/service.go walks spec.Egress, never spec.EgressDeny), and an
+egressDeny whose only destination is an unresolved `toServices` reaches the
+datapath with a non-nil-but-empty L3 selector, which Cilium reads as a
+WILDCARD when the rule carries toPorts (pkg/policy/types/policyentry.go). That
+denies EVERY destination on that port for every selected endpoint -- a
+cluster-wide egress outage rather than a tighter deny.
+
+The API server and host-network workloads are not selected: a rule carrying an
+endpointSelector can never match the host endpoint, because Cilium routes host
+policy through nodeSelector instead (pkg/policy/rule.go, matchesSubject). This
+component exists only on the management cluster, so unlike ingress-nginx there
+is no konnectivity-tunnelled caller to exempt.
+
+A second, target-side rule keeps the external-world deny. Its static entity
+selector does not depend on namespace identities, so it does not recreate the
+churn failure mode. It is retained rather than relied upon for the API server:
+`cilium monitor` on this webhook's endpoint on a live kube-ovn cluster showed
+the API server arriving from the node InternalIP with identity `host` when it
+originates on the same node and `kube-apiserver` when it originates on
+another, never from the kube-ovn join subnet and never as `world`.
+
+Note the scope this actually has: it removes in-cluster pods and external
+traffic, not every possible caller. Any host-network workload on the
+management cluster carries the same host / remote-node identity that exempts
+the API server and keeps its reach.
 */}}
 apiVersion: cilium.io/v2
 kind: CiliumClusterwideNetworkPolicy
@@ -31,14 +64,6 @@ specs:
     ingress: false
     egress: false
   egressDeny:
-  - toServices:
-    - k8sService:
-        namespace: {{ .Release.Namespace | quote }}
-        serviceName: {{ include "namespace-annotation-webhook.fullname" . | quote }}
-    toPorts:
-    - ports:
-      - port: {{ include "namespace-annotation-webhook.servicePort" . | quote }}
-        protocol: TCP
   - toEndpoints:
     - matchLabels:
         "k8s:io.kubernetes.pod.namespace": {{ .Release.Namespace | quote }}
