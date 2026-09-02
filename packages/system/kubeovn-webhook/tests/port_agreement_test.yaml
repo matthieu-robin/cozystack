@@ -39,7 +39,9 @@ tests:
     # denied, and Cilium translates a service to its backends before enforcing
     # egress policy, so there is no frontend value that has to stay in
     # agreement. The Service still has to expose 443, because that is the port
-    # the ValidatingWebhookConfiguration dials.
+    # the caller dials: this package registers a MutatingWebhookConfiguration
+    # whose clientConfig.service omits `port`, and the API server defaults that
+    # to 443.
     asserts:
       - equal:
           path: spec.ports[0].port
