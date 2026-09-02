@@ -1405,32 +1405,53 @@ spec:
             echo "$n"
           }
 
+          # Distinct variable names from require_webhook_up below, deliberately:
+          # POSIX shell functions share one scope, so reusing `label` here
+          # appended each iteration's suffix to the caller's own copy and the
+          # second registration reported itself as "(1/2) (2/2)".
+          require_service_up() {
+            svclabel="$1"; svcns="$2"; svcname="$3"; svcbudget="$4"
+            svcdeadline=$(( $(date +%s) + svcbudget ))
+            while :; do
+              n=$(ready_backends "$svcns" "$svcname")
+              if [ "$n" -gt 0 ]; then
+                echo "PRECONDITION OK  $svclabel ($svcns/$svcname) has $n ready backend(s)"
+                return 0
+              fi
+              [ "$(date +%s)" -lt "$svcdeadline" ] || break
+              sleep 5
+            done
+            echo "SETUP FAILURE: $svclabel ($svcns/$svcname) has no ready backend after ${svcbudget}s." >&2
+            echo "  This test cannot tell a churn-induced outage from a webhook that was" >&2
+            echo "  already down, and every apply below goes through it, so it stops here" >&2
+            echo "  rather than reporting the wrong cause." >&2
+            kubectl -n "$svcns" get endpointslice -l "kubernetes.io/service-name=$svcname" -o yaml >&2 2>&1 || true
+            kubectl -n "$svcns" get pods -o wide >&2 2>&1 || true
+            return 1
+          }
+
+          # EVERY registration of the named webhook, not just the first. All of
+          # them fire on the applies below, so one being down aborts the apply
+          # and the failure would be reported as a churn-induced outage. The
+          # loop indexes with sed rather than piping into `while read`, because
+          # a pipeline's body runs in a subshell under dash and a `return` from
+          # it would not reach this function.
           require_webhook_up() {
             label="$1"; kind="$2"; hook="$3"; budget="$4"
-            coords=$(webhook_services "$kind" | awk -v h="$hook" '$1 == h { print $2, $3; exit }')
+            coords=$(webhook_services "$kind" | awk -v h="$hook" '$1 == h { print $2, $3 }')
             [ -n "$coords" ] || {
               echo "SETUP FAILURE: no $kind registers webhook $hook, so its availability cannot be asserted" >&2
               return 1
             }
-            wns=$(echo "$coords" | awk '{print $1}')
-            wsvc=$(echo "$coords" | awk '{print $2}')
-            deadline=$(( $(date +%s) + budget ))
-            while :; do
-              n=$(ready_backends "$wns" "$wsvc")
-              if [ "$n" -gt 0 ]; then
-                echo "PRECONDITION OK  $label ($wns/$wsvc) has $n ready backend(s)"
-                return 0
-              fi
-              [ "$(date +%s)" -lt "$deadline" ] || break
-              sleep 5
+            total=$(printf '%s\n' "$coords" | grep -c . || true)
+            [ -n "$total" ] || total=0
+            i=0
+            while [ "$i" -lt "$total" ]; do
+              i=$(( i + 1 ))
+              line=$(printf '%s\n' "$coords" | sed -n "${i}p")
+              require_service_up "$label ($i/$total)" "${line% *}" "${line#* }" "$budget" || return 1
             done
-            echo "SETUP FAILURE: $label ($wns/$wsvc) has no ready backend after ${budget}s." >&2
-            echo "  This test cannot tell a churn-induced outage from a webhook that was" >&2
-            echo "  already down, and every apply below goes through it, so it stops here" >&2
-            echo "  rather than reporting the wrong cause." >&2
-            kubectl -n "$wns" get endpointslice -l "kubernetes.io/service-name=$wsvc" -o yaml >&2 2>&1 || true
-            kubectl -n "$wns" get pods -o wide >&2 2>&1 || true
-            return 1
+            return 0
           }
 
           require_webhook_up "ingress admission" validatingwebhookconfigurations \
@@ -1445,11 +1466,10 @@ spec:
           # The pod is what makes this a churn test rather than a smoke test. A
           # Cilium identity is the set of an endpoint's identity-relevant
           # labels, and k8s:io.kubernetes.pod.namespace is one of them, so a pod
-          # in a brand-new namespace allocates a NEW identity and deleting the
-          # namespace releases it -- which is the SelectorCache.UpdateIdentities
-          # path the old target-side policies coupled the webhook endpoint to.
-          # An empty namespace has no endpoint, allocates no identity, and its
-          # deletion drives none of that.
+          # in a brand-new namespace allocates a NEW identity, and deleting the
+          # namespace releases it. An empty namespace has no endpoint, allocates
+          # no identity, and its deletion drives no identity churn at all, so
+          # without the pod this case would exercise nothing it names.
           kubectl delete namespace "$churn_ns" --ignore-not-found --wait=true --timeout=60s
           kubectl apply -f - <<EOF
           apiVersion: v1
@@ -1635,7 +1655,11 @@ spec:
           svcs=$(kubectl -n "$ns" get svc -l "$sel" \
             -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
           adm=$(printf '%s\n' "$svcs" | grep -- '-admission$' | head -1 || true)
-          ctl=$(printf '%s\n' "$svcs" | grep -v -- '-admission$' | grep . | head -1 || true)
+          # -metrics is excluded explicitly rather than relying on
+          # ingress-nginx-controller sorting before ingress-nginx-controller-metrics
+          # under head -1: the positive control has to be the Service that
+          # actually exposes the controller's https port.
+          ctl=$(printf '%s\n' "$svcs" | grep -v -- '-admission$' | grep -v -- '-metrics$' | grep . | head -1 || true)
           [ -n "$adm" ] || { echo "SETUP FAILURE: no ingress-nginx admission Service in $ns" >&2; exit 1; }
           [ -n "$ctl" ] || { echo "SETUP FAILURE: no ingress-nginx controller Service in $ns" >&2; exit 1; }
 
