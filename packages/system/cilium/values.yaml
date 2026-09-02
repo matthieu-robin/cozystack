@@ -1,4 +1,14 @@
 cilium:
+  # Load-bearing beyond service routing, and pinned for that reason. The
+  # admission-webhook deny policies in packages/system/ingress-nginx and
+  # packages/system/kubeovn-webhook name only their webhook's backend port, which
+  # covers a pod dialling the ClusterIP only while Cilium is the thing that
+  # performs the service DNAT -- and only this value makes it so, against an
+  # upstream chart default of "false". Setting it false does not break those
+  # policies visibly; it reopens the ClusterIP path to both webhooks while the
+  # backend deny keeps working. tests/kube_proxy_replacement_test.yaml asserts
+  # the rendered value across the defaults and every variant valuesFiles
+  # combination, and carries the whole argument.
   kubeProxyReplacement: true
   # Upstream cilium with hostFirewall enabled and the IPv6 datapath disabled
   # (ipv6.enabled=false, the default here) drops ALL node IPv6 before any

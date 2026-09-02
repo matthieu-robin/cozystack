@@ -43,6 +43,28 @@ carries toPorts (pkg/policy/types/policyentry.go). Such a rule denies every
 destination on that port for every selected endpoint -- a cluster-wide
 egress outage, not a tighter deny.
 
+That ordering is Cilium's own, and it is conditional: it holds while Cilium owns
+service load-balancing, which on every cozystack variant it does because
+packages/system/cilium/values.yaml sets kubeProxyReplacement: true against an
+upstream chart default of "false". Set that false and the ClusterIP DNAT moves
+downstream of Cilium's egress hook (kube-proxy in the host netns, or kube-ovn's
+OVN load balancer): the packet reaches policy_can_egress4 with dst = ClusterIP,
+matches no endpoint identity, and -- default-deny being off -- is allowed. Pods
+regain <admission>.<ns>.svc:443 while the backend deny below keeps working, and
+nothing reports the change.
+
+Two things keep that from happening quietly.
+packages/system/cilium/tests/kube_proxy_replacement_test.yaml pins the value
+across the chart defaults and all five variant valuesFiles combinations, so
+flipping it reddens the cilium package's own suite; it also carries the full
+argument, including why a target-side ingressDeny cannot be re-added here as a
+fallback (its peer selector is what carries namespace churn, and the one
+churn-free peer is a wildcard that would deny the API server too). And the
+deny-still-enforced case in hack/e2e-chainsaw/gateway/chainsaw-test.yaml
+connects to the admission ClusterIP from a pod and requires that connect to
+fail, so the effect is asserted against a live cluster rather than only reasoned
+about here.
+
 The first rule covers every workload outside kube-system. The second covers
 kube-system except the konnectivity-agent ServiceAccount: a Kamaji-hosted
 tenant cluster reaches in-cluster webhooks through that pod, and Kamaji sets

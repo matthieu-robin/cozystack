@@ -51,6 +51,12 @@ image: ghcr.io/cozystack/cozystack/kubeovn-webhook:v1.6.0@sha256:593c324a38db594
 # target-side world deny both read that one definition -- see
 # namespace-annotation-webhook.port in templates/_helpers.tpl. Only the backend
 # port is denied; Cilium translates a service to its backends before enforcing
-# egress policy, so ClusterIP-addressed traffic is matched there too.
+# egress policy, so ClusterIP-addressed traffic is matched there too. That last
+# step depends on Cilium owning service load-balancing --
+# packages/system/cilium/values.yaml kubeProxyReplacement, true there against an
+# upstream default of "false", pinned by
+# packages/system/cilium/tests/kube_proxy_replacement_test.yaml, which carries
+# the argument. Flip it and the ClusterIP path to /mutate-pods reopens while the
+# backend deny keeps working.
 webhookPolicy:
   enabled: true

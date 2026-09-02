@@ -35,6 +35,18 @@ WILDCARD when the rule carries toPorts (pkg/policy/types/policyentry.go). That
 denies EVERY destination on that port for every selected endpoint -- a
 cluster-wide egress outage rather than a tighter deny.
 
+That ordering is Cilium's own and it is conditional: it holds while Cilium owns
+service load-balancing, which on every cozystack variant it does because
+packages/system/cilium/values.yaml sets kubeProxyReplacement: true against an
+upstream chart default of "false". Set that false and the ClusterIP DNAT moves
+downstream of Cilium's egress hook, the packet reaches policy_can_egress4 with
+dst = ClusterIP, matches no endpoint identity, and -- default-deny being off --
+is allowed, restoring pod access to /mutate-pods with nothing to look at.
+packages/system/cilium/tests/kube_proxy_replacement_test.yaml pins that value
+and carries the full argument, including why a target-side ingressDeny is not
+available as a fallback: its peer selector is what carries namespace churn, and
+the only churn-free peer is a wildcard that would deny the API server too.
+
 The API server and host-network workloads are not selected: a rule carrying an
 endpointSelector can never match the host endpoint, because Cilium routes host
 policy through nodeSelector instead (pkg/policy/rule.go, matchesSubject). This
