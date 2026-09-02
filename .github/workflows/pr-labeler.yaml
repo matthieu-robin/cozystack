@@ -66,6 +66,7 @@ jobs:
               'mariadb':             'area/database',
               'mariadb-operator':    'area/database',
               'redis':               'area/database',
+              'valkey':              'area/database',
               'etcd':                'area/database',
               'kafka':               'area/database',
               'clickhouse':          'area/database',
