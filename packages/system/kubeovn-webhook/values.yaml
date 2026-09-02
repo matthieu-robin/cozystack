@@ -57,6 +57,16 @@ image: ghcr.io/cozystack/cozystack/kubeovn-webhook:v1.6.0@sha256:593c324a38db594
 # upstream default of "false", pinned by
 # packages/system/cilium/tests/kube_proxy_replacement_test.yaml, which carries
 # the argument. Flip it and the ClusterIP path to /mutate-pods reopens while the
-# backend deny keeps working.
+# backend deny keeps working -- except that the policy's target-side rule does
+# not depend on that value at all, being evaluated on the webhook's own ingress
+# path after whatever DNAT already happened, so the two together degrade rather
+# than fail open.
+#
+# Residual risk worth stating: no test in this repo can observe a live cluster's
+# Cilium values, so an operator setting kubeProxyReplacement: false in the field
+# is caught only by the status ConfigMap that
+# packages/system/cilium/templates/kube-proxy-replacement-beacon.yaml renders.
+# Whether that configuration is supported at all is a platform question this
+# chart does not answer.
 webhookPolicy:
   enabled: true

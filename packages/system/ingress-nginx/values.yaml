@@ -121,6 +121,17 @@ ingress-nginx:
 # true there against an upstream default of "false". It is pinned by
 # packages/system/cilium/tests/kube_proxy_replacement_test.yaml, which carries
 # the argument; flip it and the ClusterIP path to this webhook reopens while the
-# backend deny keeps working.
+# backend deny keeps working. The target-side rule in the same policy does not
+# depend on that value at all -- it is evaluated on the webhook's own ingress
+# path, after whatever DNAT already happened -- so the two together degrade
+# rather than fail open.
+#
+# Residual risk worth stating: no test in this repo can observe a live cluster's
+# Cilium values, so an operator setting kubeProxyReplacement: false in the field
+# is caught only by the status ConfigMap that
+# packages/system/cilium/templates/kube-proxy-replacement-beacon.yaml renders,
+# and inside a tenant Kubernetes cluster only by the equivalent beacon in
+# packages/apps/kubernetes. Whether that configuration is supported at all is a
+# platform question this chart does not answer.
 admissionWebhookPolicy:
   enabled: true

@@ -62,7 +62,7 @@ tests:
       - notExists:
           path: specs[1].egressDeny[0].toServices
       - exists:
-          path: specs[2].ingressDeny[0].fromEntities
+          path: specs[2].ingressDeny[1].fromEntities
 
 
   - it: applies the same destination deny to both source groups
@@ -121,13 +121,58 @@ tests:
             k8s:app.kubernetes.io/instance: ingress-nginx
             k8s:app.kubernetes.io/component: controller
       - contains:
-          path: specs[2].ingressDeny[0].fromEntities
+          path: specs[2].ingressDeny[1].fromEntities
           content: world
+      - equal:
+          path: specs[2].ingressDeny[1].toPorts[0].ports[0].port
+          value: "8443"
+      - notExists:
+          path: specs[2].endpointSelector.matchExpressions
+
+  # The target-side pod deny is what keeps this policy enforcing where Cilium is
+  # not the service load balancer, so its PEER is the load-bearing part and the
+  # two ways of losing it are silent. `fromEntities: [all]` and an omitted peer
+  # both widen the rule to every source identity, reserved ones included, which
+  # would deny the API server on a fail-closed webhook -- and both still render
+  # as a plausible-looking ingressDeny. A CRD-sourced fromEndpoints cannot do
+  # that: Cilium rewrites it to also require the pod-namespace label to exist
+  # (pkg/k8s/apis/cilium.io/utils/utils.go:120-154, v1.19.5), which no reserved
+  # identity carries. Both substitutions are asserted against here, and both
+  # were made and watched go red.
+  #
+  # The konnectivity-agent exemption is carried on this rule too, and for the
+  # same reason as on the source side: without it a Kamaji-hosted tenant
+  # cluster's Ingress admission breaks, because the API server reaches this
+  # webhook through that pod rather than from its own address.
+  - it: keeps a target-side pod deny whose peer cannot reach reserved identities
+    asserts:
+      - lengthEqual:
+          path: specs[2].ingressDeny
+          count: 2
+      - equal:
+          path: specs[2].ingressDeny[0].fromEndpoints
+          value:
+            - matchExpressions:
+                - key: k8s:io.kubernetes.pod.namespace
+                  operator: NotIn
+                  values:
+                    - kube-system
+            - matchExpressions:
+                - key: k8s:io.kubernetes.pod.namespace
+                  operator: In
+                  values:
+                    - kube-system
+                - key: io.cilium.k8s.policy.serviceaccount
+                  operator: NotIn
+                  values:
+                    - konnectivity-agent
+      - notExists:
+          path: specs[2].ingressDeny[0].fromEntities
       - equal:
           path: specs[2].ingressDeny[0].toPorts[0].ports[0].port
           value: "8443"
       - notExists:
-          path: specs[2].endpointSelector.matchExpressions
+          path: specs[2].ingressDeny[1].fromEndpoints
 
   - it: does not enable default deny on source or target endpoints
     asserts:
@@ -178,6 +223,9 @@ tests:
           value: "9443"
       - equal:
           path: specs[2].ingressDeny[0].toPorts[0].ports[0].port
+          value: "9443"
+      - equal:
+          path: specs[2].ingressDeny[1].toPorts[0].ports[0].port
           value: "9443"
 
   - it: does not render when the upstream admission webhook is disabled
