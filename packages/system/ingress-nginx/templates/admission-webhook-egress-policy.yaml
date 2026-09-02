@@ -15,20 +15,40 @@ flaw in the webhook then becomes exploitable by any workload in any
 namespace, which is what made CVE-2025-1974 (IngressNightmare) critical
 rather than merely serious.
 
-This is deliberately source-side. A target-side ingress policy with a
-cluster-wide fromEndpoints selector makes every namespace identity part of
-the webhook endpoint's own policy, so every namespace create or delete
-recomputes a selector attached to the fail-closed endpoint. Selecting callers
-instead keeps the namespace-wide selector on source endpoints, where a
-recomputation cannot take admission down.
+The deny is expressed from BOTH ends, and the reason is that each end fails in
+a direction the other does not.
+
+The source-side specs (the first two) are an egressDeny evaluated on the
+caller's own endpoint, so they hold while the webhook endpoint's policy is
+being recomputed or has overflowed its own policy map. What they cannot do is
+survive a datapath where Cilium is not the service load balancer, because they
+name the webhook's backend port and rely on the DNAT happening first.
+
+The target-side spec (the third) is an ingressDeny on the webhook endpoint,
+evaluated after whatever DNAT already happened, so it is independent of the
+service-LB implementation. What it cannot do is stay off the fail-closed
+endpoint's own policy: denying pods needs a cluster-spanning peer, and that is
+enumerated per identity on this endpoint.
+
+So be exact about what shipping both means, because the source-side rules were
+added to get a cluster-spanning selector OFF the webhook endpoint and the
+target-side rule puts one back. This change does not eliminate the
+namespace-churn map writes on that endpoint. It makes them non-load-bearing:
+whichever end is degraded, the other still denies, and the writes are writes
+rather than an outage (see the cost paragraph on the third spec). Removing the
+coupling outright would mean dropping the target-side rule and accepting a
+silent fail-open wherever Cilium does not own the DNAT, which is the worse
+trade.
 
 Stated precisely, because #3983 was reported as a hard outage rather than a
-flap: that coupling is structural and is removed here, but it was not
-reproduced in isolation as the trigger, and the world deny below -- the other
-candidate named in the issue -- is retained on the evidence quoted at the end
-of this comment. The source-side form is the better shape either way, and
-hack/e2e-chainsaw/gateway/chainsaw-test.yaml now covers both the availability
-and the deny it is supposed to provide.
+flap: the coupling above is real, but it was not reproduced in isolation as the
+trigger, and the symptom the issue reports -- connect: no route to host, i.e.
+EHOSTUNREACH -- cannot come from a policy denial at all, since a deny drops
+after connect() has returned and the caller sees a timeout. See the PR
+description for where that errno does come from. The world deny below, the
+other candidate the issue named, is retained on the evidence quoted at the end
+of this comment. hack/e2e-chainsaw/gateway/chainsaw-test.yaml covers both the
+availability and the deny these rules are supposed to provide.
 
 Only the BACKEND port is denied, and that is sufficient rather than an
 oversight. Cilium translates a service to its backends BEFORE egress policy

@@ -13,15 +13,30 @@ distinction is why it works: packages/system/kubeovn/values.yaml sets
 ENABLE_NP: false, so kube-ovn programs no ACLs and a core NetworkPolicy would
 be created and never enforced. Cilium enforces its own policies regardless.
 
-The policy is source-side and deny-only. Selecting callers avoids coupling the
-webhook endpoint's ingress policy to every namespace identity, where every
-namespace create or delete recomputes a selector attached to a fail-closed
-endpoint. That coupling is structural and is removed here; it was not
-reproduced in isolation as the trigger of #3983, and the world deny below --
-the other candidate named in that issue -- is retained on the evidence quoted
-further down. enableDefaultDeny stays false, so the policy subtracts one
-destination and port from pod egress and leaves everything else exactly as it
-was.
+Deny-only, and expressed from both ends because each end fails in a direction
+the other does not. The source-side spec is an egressDeny on the caller's own
+endpoint, so it holds while this webhook's endpoint policy is being recomputed
+or has overflowed its map, but it relies on Cilium performing the service DNAT
+before egress policy runs. The target-side spec is an ingressDeny on this
+webhook's endpoint, evaluated after whatever DNAT already happened, so it is
+independent of the service-LB implementation, but denying pods there needs a
+cluster-spanning peer enumerated per identity on a fail-closed endpoint.
+
+Be exact about what that means: the source-side spec was added to get a
+cluster-spanning selector OFF this endpoint, and the target-side spec puts one
+back. Shipping both does not eliminate the namespace-churn map writes here; it
+makes them non-load-bearing, because whichever end is degraded the other still
+denies, and the writes are writes rather than an outage (see the cost paragraph
+on the second spec). The alternative -- dropping the target-side rule -- buys
+the coupling back at the price of a silent fail-open wherever Cilium does not
+own the DNAT.
+
+That coupling was not reproduced in isolation as the trigger of #3983, and the
+errno the issue reports cannot come from a policy denial; see the PR
+description. The world deny below, the other candidate that issue named, is
+retained on the evidence quoted further down. enableDefaultDeny stays false, so
+the policy subtracts one destination and port and leaves everything else
+exactly as it was.
 
 Only the BACKEND port is denied, and that is sufficient. Cilium translates a
 service to its backends BEFORE egress policy is enforced, so a pod dialling

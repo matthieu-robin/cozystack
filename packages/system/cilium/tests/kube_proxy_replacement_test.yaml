@@ -37,11 +37,11 @@ suite: cilium owns service load-balancing
 # happened, so it enforces whoever performs the translation. Losing
 # kubeProxyReplacement therefore degrades the source-side rules and leaves the
 # target-side ones standing. That is defence in depth, not a reason to relax
-# this pin: the source-side form is what stops a namespace delete from
-# recomputing a cluster-spanning selector attached to a fail-closed endpoint,
-# and the target-side form is what survives a different service-LB
-# implementation. Each carries its own cost, and both are argued in the
-# templates next to the rules rather than here.
+# this pin: the source-side form is what still denies while the webhook
+# endpoint's own policy is being recomputed or has overflowed its map, and the
+# target-side form is what survives a different service-LB implementation.
+# Neither subsumes the other, each carries its own cost, and both are argued in
+# the templates next to the rules rather than here.
 #
 # The other half of the guard is behavioural rather than static: the
 # admission-webhook-deny-still-enforced case in

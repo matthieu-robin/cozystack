@@ -1345,11 +1345,14 @@ spec:
     - apply:
         file: ingress-external-allow.yaml
 ---
-# Regression for #3983. The old target-side Cilium policies selected callers
-# from every namespace, so deleting an unrelated namespace regenerated the
-# webhook endpoints' ingress policy and briefly made fail-closed admission
-# webhooks unreachable from the API server. Exercise both affected webhook
-# paths immediately after the deletion, with no retry to hide the outage.
+# Regression for #3983, which reported fail-closed admission webhooks becoming
+# unreachable from the API server while an unrelated namespace was deleted. The
+# mechanism is NOT confirmed: the errno in that report cannot come from a policy
+# denial, and namespace deletion churns service backends as well as Cilium
+# identities. So this case asserts the property the issue is about -- both
+# webhooks still admit across a namespace deletion -- rather than claiming to
+# reproduce a cause. Both affected paths are exercised immediately after the
+# deletion, with no retry to hide a window.
 #
 # Every apply in this test passes through both fail-closed webhooks, so a
 # cluster whose webhooks were ALREADY down fails here in a way that reads
