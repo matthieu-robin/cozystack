@@ -105,6 +105,13 @@ ingress-nginx:
 # Deny Cilium-managed pod traffic to the admission webhook. The API server
 # remains reachable directly on a management cluster or through the
 # konnectivity-agent ServiceAccount on a Kamaji-hosted tenant cluster;
-# host-network workloads remain outside this pod policy. Requires Cilium.
+# host-network workloads remain outside this pod policy.
+#
+# Rendered as a CiliumClusterwideNetworkPolicy, and the template renders only
+# while that Cilium API is discoverable. So `true` is not a promise that a
+# policy exists: on a cluster serving no such API the chart emits nothing,
+# without an Event or a render-time message to look at. Set enabled: false to
+# opt out deliberately, which is what separates "this cluster has no Cilium"
+# from "this deny was not wanted here".
 admissionWebhookPolicy:
   enabled: true
