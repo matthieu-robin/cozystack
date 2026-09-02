@@ -31,28 +31,17 @@ suite: cilium owns service load-balancing
 # and the packet is allowed. Every pod regains <webhook>.<ns>.svc:443 while the
 # backend-port deny keeps working and nothing reports a change.
 #
-# Re-adding a target-side ingressDeny on the webhook pods as a second line of
-# defence does not work, and that is recorded here because it is the obvious
-# next idea. To deny pods, a target-side rule needs a peer selector covering
-# them, and the peer selector is what carries namespace churn -- which is the
-# failure this whole arrangement was built to remove (#3983):
-#
-#   * pkg/policy/selectorcache.go, SelectorCache.UpdateIdentities ->
-#     updateSelections, which notifies a selector's users only when the churned
-#     identities were in ITS cached selections;
-#   * pkg/policy/l4.go, L4Filter.IdentitySelectionUpdated -> AccumulateMapChanges,
-#     which writes the policy map of every endpoint the rule's endpointSelector
-#     selects -- for a target-side rule, the fail-closed webhook pods.
-#
-# So a cluster-wide non-wildcard peer (`namespace Exists`, or a kube-system
-# split) reattaches every namespace identity to the webhook endpoint's own
-# policy, which is exactly the shape that was removed. The one churn-free peer
-# is the wildcard `{}`: pkg/policy/l4.go collapses it to a single ANY-identity
-# map entry and returns early from IdentitySelectionUpdated, so identity churn
-# never touches it. But ANY covers the reserved identities too -- host,
-# remote-node, kube-apiserver -- so it would deny the API server and stop
-# admission cluster-wide. There is no third shape, which is why the dependency
-# is pinned here instead of being hedged there.
+# Both policies also carry a target-side ingressDeny on their own webhook pods
+# for the same port, and that half does NOT depend on this value: it is
+# evaluated on the destination's ingress path, after whatever DNAT already
+# happened, so it enforces whoever performs the translation. Losing
+# kubeProxyReplacement therefore degrades the source-side rules and leaves the
+# target-side ones standing. That is defence in depth, not a reason to relax
+# this pin: the source-side form is what stops a namespace delete from
+# recomputing a cluster-spanning selector attached to a fail-closed endpoint,
+# and the target-side form is what survives a different service-LB
+# implementation. Each carries its own cost, and both are argued in the
+# templates next to the rules rather than here.
 #
 # The other half of the guard is behavioural rather than static: the
 # admission-webhook-deny-still-enforced case in
@@ -146,3 +135,49 @@ tests:
       - equal:
           path: data["kube-proxy-replacement"]
           value: "true"
+
+  # The beacon is the only half of this guard that can fire in the field. The
+  # pin above catches a cozystack commit changing the default; nothing in this
+  # repo observes a live cluster's values, so an operator override reaches a
+  # running cluster unobserved. A ConfigMap rather than fail(), because whether
+  # Cilium without kube-proxy replacement is supported at all is a platform
+  # decision, and refusing to render the CNI over a weakened defence-in-depth
+  # control is not this chart's call to make.
+  - it: emits no beacon while Cilium owns service load-balancing
+    template: templates/kube-proxy-replacement-beacon.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: emits a visible beacon when the value is turned off
+    template: templates/kube-proxy-replacement-beacon.yaml
+    set:
+      cilium.kubeProxyReplacement: false
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: data.status
+          value: kube-proxy-replacement-off
+      - equal:
+          path: data.kubeProxyReplacement
+          value: "false"
+      - matchRegex:
+          path: data.message
+          pattern: "cover traffic addressed to the webhook Service ClusterIP"
+
+  # The string form is what the upstream chart's own default uses, and the
+  # subchart's value coalesces into the parent, so this is also the shape a
+  # deleted umbrella key falls back to.
+  - it: treats the string form as off too
+    template: templates/kube-proxy-replacement-beacon.yaml
+    set:
+      cilium.kubeProxyReplacement: "false"
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: data.kubeProxyReplacement
+          value: "false"

@@ -9,6 +9,14 @@ include ../../../hack/package.mk
 # hack/helm-unit-tests.sh discovers work by probing for this target, so a
 # package without one is skipped in silence however many suites sit under
 # tests/.
+#
+# Phony because hack/package.mk's .PHONY line deliberately does not carry
+# `test` -- it lists only the targets that file defines, and hack/package-mk-phony.bats
+# pins that -- so a path named `test` next to this Makefile would otherwise make
+# the target up to date and skip the recipe. That matters here beyond tidiness:
+# tests/kube_proxy_replacement_test.yaml is the pin two other packages' deny
+# policies rely on, and a skipped recipe removes it in silence.
+.PHONY: test
 test:
 	helm unittest .
 

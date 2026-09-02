@@ -85,4 +85,58 @@ spec:
   - name: {{ .Release.Name }}-gateway-api-crds
     namespace: {{ .Release.Namespace }}
   {{- end }}
+
+{{- /*
+addons.cilium.valuesOverride is x-kubernetes-preserve-unknown-fields, so a
+tenant can set cilium.kubeProxyReplacement: false for its own cluster. That is
+the one path by which the value reaches a live cluster without a cozystack
+commit, and it is the path the guest cluster's own ingress-nginx admission deny
+depends on: that policy names the webhook backend port only, which covers a pod
+dialling the ClusterIP solely because Cilium performs the service DNAT ahead of
+its own egress hook. Override it and pods inside the guest cluster regain the
+ClusterIP path to the admission webhook while the backend deny keeps working --
+no failure, no log line, and the rendered policy unchanged.
+
+The mismatch is detectable here rather than in the guest cluster, because this
+HelmRelease's values are assembled on the management cluster, so the beacon is
+emitted next to the release that carries the override. Same mechanism and same
+reasoning as the -awaiting-etcd beacon in ../cluster.yaml: a ConfigMap an
+operator and an alert can both see, not a fail() that would take the tenant's
+only CNI down over a weakened defence-in-depth control.
+
+Absence is not a warning: the value is unset in both the override and
+cozystack.defaultCiliumValues on every supported path, and the cilium chart's
+own values.yaml then supplies true. Only an explicit non-true value fires.
+*/}}
+{{- $merged := deepCopy .Values.addons.cilium.valuesOverride | mergeOverwrite (fromYaml (include "cozystack.defaultCiliumValues" .)) }}
+{{- $mergedCilium := dig "cilium" dict $merged }}
+{{- $kpr := dig "kubeProxyReplacement" "" $mergedCilium }}
+{{- if and (ne (toString $kpr) "") (ne (toString $kpr) "true") }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-cilium-kube-proxy-replacement-off
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/name: kubernetes
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  status: "kube-proxy-replacement-off"
+  kubeProxyReplacement: {{ toString $kpr | quote }}
+  message: |
+    addons.cilium.valuesOverride sets cilium.kubeProxyReplacement to
+    {{ toString $kpr | quote }} for cluster {{ .Release.Name }}.
+
+    Cilium in that guest cluster will not perform the ClusterIP DNAT ahead of
+    its own egress hook, so the admission-webhook deny the guest cluster's
+    ingress-nginx ships no longer covers traffic addressed to the webhook
+    Service ClusterIP. Pods in the guest cluster can reach
+    <webhook>.<namespace>.svc:443; the webhook's backend port stays denied.
+
+    This is a deliberate override, so it is reported rather than refused. Clear
+    it to restore the control, or set the guest ingress-nginx addon's
+    admissionWebhookPolicy.enabled explicitly so the posture is recorded.
+{{- end }}
 {{- end }}
