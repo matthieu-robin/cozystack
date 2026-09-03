@@ -1344,3 +1344,548 @@ spec:
     try:
     - apply:
         file: ingress-external-allow.yaml
+---
+# Regression for #3983, which reported fail-closed admission webhooks becoming
+# unreachable from the API server while an unrelated namespace was deleted. The
+# mechanism is NOT confirmed: the errno in that report cannot come from a policy
+# denial, and namespace deletion churns service backends as well as Cilium
+# identities. So this case asserts the property the issue is about -- both
+# webhooks still admit across a namespace deletion -- rather than claiming to
+# reproduce a cause. Both affected paths are exercised immediately after the
+# deletion, with no retry to hide a window.
+#
+# Every apply in this test passes through both fail-closed webhooks, so a
+# cluster whose webhooks were ALREADY down fails here in a way that reads
+# exactly like the outage under test. The first run of this case did precisely
+# that: the ingress-nginx controller was crash-looping, the admission Service
+# had no ready backend, and the setup apply died with "dial tcp ...: no route to
+# host" before any churn happened. So availability is asserted before the churn
+# as a precondition with its own message, and the churn verdict is only reached
+# once both webhooks are known to have been up to begin with.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: admission-webhooks-survive-namespace-churn
+spec:
+  catch:
+  - events: {}
+  steps:
+  - name: ingress-and-pod-admission-remain-available-after-deletion
+    try:
+    - script:
+        # Above the sum of the inner budgets, per the rule in
+        # hack/e2e-chainsaw/.chainsaw.yaml: 2x90s of webhook preconditions, 60s
+        # of pre-clean delete, 90s waiting for the churn pod, 180s for the
+        # namespace delete = 510s, and timeouts.exec would otherwise cap the
+        # whole script at 5m and SIGKILL it with no verdict.
+        timeout: 12m
+        content: |
+          set -eu
+          ns="$NAMESPACE"
+          churn_ns=tenant-admission-churn-probe
+          apex=$(kubectl get namespace "$ns" -o jsonpath='{.metadata.labels.namespace\.cozystack\.io/host}')
+          [ -n "$apex" ] || { echo "SETUP FAILURE: $ns lacks the namespace.cozystack.io/host label" >&2; exit 1; }
+
+          # Coordinates come from the webhook registrations themselves, which is
+          # what the API server dials, rather than from a guessed release name or
+          # namespace. A webhook that is not registered at all is a setup
+          # failure: nothing below could then prove anything about it.
+          webhook_services() {
+            kubectl get "$1" \
+              -o jsonpath='{range .items[*]}{range .webhooks[*]}{.name}{" "}{.clientConfig.service.namespace}{" "}{.clientConfig.service.name}{"\n"}{end}{end}'
+          }
+
+          # Ready endpoint addresses behind a Service. Counted from
+          # EndpointSlice .endpoints[].conditions.ready rather than from pod
+          # readiness, because that is the state the API server routes on, and
+          # because a `kubectl wait --for=condition=Ready` is satisfied
+          # transiently by a pod that is flapping.
+          ready_backends() {
+            n=$(kubectl -n "$1" get endpointslice -l "kubernetes.io/service-name=$2" \
+              -o jsonpath='{range .items[*]}{range .endpoints[*]}{.conditions.ready}{"\n"}{end}{end}' \
+              2>/dev/null | grep -c '^true$' || true)
+            [ -n "$n" ] || n=0
+            echo "$n"
+          }
+
+          # Distinct variable names from require_webhook_up below, deliberately:
+          # POSIX shell functions share one scope, so reusing `label` here
+          # appended each iteration's suffix to the caller's own copy and the
+          # second registration reported itself as "(1/2) (2/2)".
+          require_service_up() {
+            svclabel="$1"; svcns="$2"; svcname="$3"; svcbudget="$4"
+            svcdeadline=$(( $(date +%s) + svcbudget ))
+            while :; do
+              n=$(ready_backends "$svcns" "$svcname")
+              if [ "$n" -gt 0 ]; then
+                echo "PRECONDITION OK  $svclabel ($svcns/$svcname) has $n ready backend(s)"
+                return 0
+              fi
+              [ "$(date +%s)" -lt "$svcdeadline" ] || break
+              sleep 5
+            done
+            echo "SETUP FAILURE: $svclabel ($svcns/$svcname) has no ready backend after ${svcbudget}s." >&2
+            echo "  This test cannot tell a churn-induced outage from a webhook that was" >&2
+            echo "  already down, and every apply below goes through it, so it stops here" >&2
+            echo "  rather than reporting the wrong cause." >&2
+            kubectl -n "$svcns" get endpointslice -l "kubernetes.io/service-name=$svcname" -o yaml >&2 2>&1 || true
+            kubectl -n "$svcns" get pods -o wide >&2 2>&1 || true
+            return 1
+          }
+
+          # EVERY registration of the named webhook, not just the first. All of
+          # them fire on the applies below, so one being down aborts the apply
+          # and the failure would be reported as a churn-induced outage. The
+          # loop indexes with sed rather than piping into `while read`, because
+          # a pipeline's body runs in a subshell under dash and a `return` from
+          # it would not reach this function.
+          require_webhook_up() {
+            label="$1"; kind="$2"; hook="$3"; budget="$4"
+            coords=$(webhook_services "$kind" | awk -v h="$hook" '$1 == h { print $2, $3 }')
+            [ -n "$coords" ] || {
+              echo "SETUP FAILURE: no $kind registers webhook $hook, so its availability cannot be asserted" >&2
+              return 1
+            }
+            total=$(printf '%s\n' "$coords" | grep -c . || true)
+            [ -n "$total" ] || total=0
+            i=0
+            while [ "$i" -lt "$total" ]; do
+              i=$(( i + 1 ))
+              line=$(printf '%s\n' "$coords" | sed -n "${i}p")
+              require_service_up "$label ($i/$total)" "${line% *}" "${line#* }" "$budget" || return 1
+            done
+            return 0
+          }
+
+          require_webhook_up "ingress admission" validatingwebhookconfigurations \
+            validate.nginx.ingress.kubernetes.io 90
+          require_webhook_up "pod admission" mutatingwebhookconfigurations \
+            kube-ovn-webhook.cozystack.io 90
+
+          # Reproduce the incident shape: an ordinary tenant namespace carrying
+          # an admitted Ingress AND a running pod, deleted synchronously, with
+          # the fail-closed webhooks invoked while Cilium processes the removal.
+          #
+          # The pod is what makes this a churn test rather than a smoke test. A
+          # Cilium identity is the set of an endpoint's identity-relevant
+          # labels, and k8s:io.kubernetes.pod.namespace is one of them, so a pod
+          # in a brand-new namespace allocates a NEW identity, and deleting the
+          # namespace releases it. An empty namespace has no endpoint, allocates
+          # no identity, and its deletion drives no identity churn at all, so
+          # without the pod this case would exercise nothing it names.
+          kubectl delete namespace "$churn_ns" --ignore-not-found --wait=true --timeout=60s
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: ${churn_ns}
+            labels:
+              namespace.cozystack.io/host: churn.${apex}
+          EOF
+          kubectl apply -n "$churn_ns" -f - <<EOF
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: admission-churn-source
+          spec:
+            rules:
+            - host: probe.churn.${apex}
+              http:
+                paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: noop
+                      port:
+                        number: 80
+          EOF
+          # busybox:musl is staged onto every node by hack/e2e-prepull-images.sh,
+          # so this adds no image pull. The securityContext satisfies the
+          # restricted PodSecurity profile, so it runs whatever level the tenant
+          # namespace enforces.
+          kubectl apply -n "$churn_ns" -f - <<'EOF'
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: admission-churn-identity
+          spec:
+            restartPolicy: Never
+            automountServiceAccountToken: false
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 65534
+              runAsGroup: 65534
+              seccompProfile:
+                type: RuntimeDefault
+            containers:
+            - name: hold
+              image: busybox:musl
+              command: ["sleep", "600"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+          EOF
+          kubectl -n "$churn_ns" wait --for=condition=Ready pod/admission-churn-identity --timeout=90s || {
+            echo "SETUP FAILURE: the churn pod never became Ready, so deleting $churn_ns releases no Cilium identity and this test would assert nothing" >&2
+            kubectl -n "$churn_ns" describe pod admission-churn-identity >&2 2>&1 || true
+            exit 1
+          }
+
+          kubectl delete namespace "$churn_ns" --wait=true --timeout=180s
+
+          # No retry on either call: a retry would paper over exactly the window
+          # this test exists to catch.
+          #
+          # ingress-nginx validating admission
+          kubectl apply --dry-run=server -n "$ns" -o name -f - <<EOF
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: admission-after-churn
+          spec:
+            rules:
+            - host: admission-after-churn.${apex}
+              http:
+                paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: noop
+                      port:
+                        number: 80
+          EOF
+
+          # kubeovn-webhook mutating admission. The securityContext is carried
+          # even though a server dry-run Pod is never scheduled: if the tenant
+          # namespace ever enforces restricted PodSecurity, a non-compliant Pod
+          # is rejected in the validating phase and `set -eu` would abort this
+          # check, which reads as the webhook being down.
+          kubectl apply --dry-run=server -n "$ns" -o name -f - <<'EOF'
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: admission-after-churn
+          spec:
+            restartPolicy: Never
+            automountServiceAccountToken: false
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 65534
+              runAsGroup: 65534
+              seccompProfile:
+                type: RuntimeDefault
+            containers:
+            - name: pause
+              image: registry.k8s.io/pause:3.10
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+          EOF
+          echo "OK   both fail-closed webhooks admitted after $churn_ns was deleted"
+        check:
+          ($error == null): true
+    finally:
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Namespace
+          name: tenant-admission-churn-probe
+---
+# Companion to admission-webhooks-survive-namespace-churn above. That test
+# proves the webhooks stay AVAILABLE; this one proves they are still
+# UNREACHABLE from pods, which is the property the policies exist for, and that
+# the deny is scoped to the webhook port alone.
+#
+# The third assertion is the one that earns this test. The policies previously
+# expressed the Service-frontend deny with `toServices`, which Cilium resolves
+# only inside ALLOW rules -- leaving the deny rule with an empty L3 selector
+# that Cilium reads as a wildcard, so "deny this Service on 443" became "deny
+# EVERY destination on 443" for every selected pod. Every rendered-YAML
+# assertion in the package suites passed on that policy. Only a probe that
+# checks an unrelated 443 destination still works can tell the two apart, and
+# the ingress controller's own HTTPS port is exactly that: the same pods, the
+# same tenant egress allowances, a different port.
+#
+# Runs in tenant-root because that is where the host cluster's ingress-nginx
+# lives and where pods are permitted to reach it (allow-internal-communication),
+# so the deny is the only thing that can block the webhook port. From the
+# isolated tenant-test the probe would pass for the wrong reason.
+#
+# And "for the wrong reason" is the whole difficulty, because a refused connect
+# does not say why it was refused. "Denied by policy" and "no backend to route
+# to" are the same observation from inside the probe, so both deny assertions
+# would report success against a cluster with no policy installed at all, as
+# long as the backend was dead. That is what the first run of this case did:
+# the controller was crash-looping on a ~100s cycle, `kubectl wait` caught it
+# during a Ready window, the probe then measured a corpse, and the port-scoping
+# assertion reported a policy bug that did not exist.
+#
+# So the deny verdicts here are gated on the admission Service having ready
+# backends before the probe, on every sample while it runs, and after it
+# finishes, and on the controller pods not having restarted or been replaced
+# across that window. The probe itself only reports reachable/unreachable per
+# destination and always exits 0; this script attributes the cause, because it
+# is the half that holds the endpoint evidence. Anything that leaves the
+# question undecidable fails as a setup failure rather than as a verdict.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: admission-webhook-deny-still-enforced
+spec:
+  namespace: tenant-root
+  catch:
+  - events: {}
+  steps:
+  - name: pods-cannot-reach-the-webhook-but-keep-unrelated-443-egress
+    try:
+    - script:
+        # Above the sum of the inner budgets, per the rule in
+        # hack/e2e-chainsaw/.chainsaw.yaml: 120s of endpoint precondition, 30s
+        # of stability sampling, 60s to clear a leftover probe and 180s of
+        # phase polling = 390s. The previous 6m sat BELOW its own sum, so a
+        # slow-but-healthy cluster was killed before the diagnostics ran.
+        timeout: 10m
+        content: |
+          set -eu
+          ns="$NAMESPACE"
+          probe=admission-deny-probe
+          sel=app.kubernetes.io/name=ingress-nginx,app.kubernetes.io/component=controller
+
+          svcs=$(kubectl -n "$ns" get svc -l "$sel" \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+          adm=$(printf '%s\n' "$svcs" | grep -- '-admission$' | head -1 || true)
+          # -metrics is excluded explicitly rather than relying on
+          # ingress-nginx-controller sorting before ingress-nginx-controller-metrics
+          # under head -1: the positive control has to be the Service that
+          # actually exposes the controller's https port.
+          ctl=$(printf '%s\n' "$svcs" | grep -v -- '-admission$' | grep -v -- '-metrics$' | grep . | head -1 || true)
+          [ -n "$adm" ] || { echo "SETUP FAILURE: no ingress-nginx admission Service in $ns" >&2; exit 1; }
+          [ -n "$ctl" ] || { echo "SETUP FAILURE: no ingress-nginx controller Service in $ns" >&2; exit 1; }
+
+          adm_port=$(kubectl -n "$ns" get svc "$adm" -o jsonpath='{.spec.ports[0].port}')
+          ctl_port=$(kubectl -n "$ns" get svc "$ctl" -o jsonpath='{.spec.ports[?(@.name=="https")].port}')
+          [ -n "$ctl_port" ] || { echo "SETUP FAILURE: $ctl exposes no https port" >&2; exit 1; }
+
+          # Ready endpoint addresses behind a Service, from EndpointSlice rather
+          # than from pod readiness: this is the state the API server and the
+          # service load balancer route on.
+          ready_backends() {
+            n=$(kubectl -n "$ns" get endpointslice -l "kubernetes.io/service-name=$1" \
+              -o jsonpath='{range .items[*]}{range .endpoints[*]}{.conditions.ready}{"\n"}{end}{end}' \
+              2>/dev/null | grep -c '^true$' || true)
+            [ -n "$n" ] || n=0
+            echo "$n"
+          }
+
+          # Pod identity plus restart count, as one string. Compared for
+          # equality across the probe window, so a restart AND a replacement
+          # both show up -- a crash-looping controller can satisfy a readiness
+          # check at both ends of a window it spent dying in the middle of.
+          controller_generation() {
+            kubectl -n "$ns" get pod -l "$sel" \
+              -o jsonpath='{range .items[*]}{.metadata.name}={.status.containerStatuses[0].restartCount}{" "}{end}'
+          }
+
+          # Precondition. Both Services are backed by the same controller pods,
+          # so requiring the admission Service to be live also establishes that
+          # the controller Service -- the positive control below -- has a
+          # backend to answer.
+          deadline=$(( $(date +%s) + 120 ))
+          while :; do
+            adm_ready=$(ready_backends "$adm")
+            ctl_ready=$(ready_backends "$ctl")
+            if [ "$adm_ready" -gt 0 ] && [ "$ctl_ready" -gt 0 ]; then break; fi
+            [ "$(date +%s)" -lt "$deadline" ] || {
+              echo "SETUP FAILURE: no ready backend for $adm ($adm_ready) or $ctl ($ctl_ready) after 120s." >&2
+              echo "  A refused connect cannot be attributed to policy while the destination" >&2
+              echo "  has nothing listening, so this test stops instead of reporting a deny" >&2
+              echo "  it did not observe." >&2
+              kubectl -n "$ns" get endpointslice -l "kubernetes.io/service-name=$adm" -o yaml >&2 2>&1 || true
+              kubectl -n "$ns" get pod -l "$sel" -o wide >&2 2>&1 || true
+              exit 1
+            }
+            sleep 5
+          done
+
+          # Stability: the same evidence held across a window, not at one
+          # instant. Six samples over 30s, all of which must be live and show no
+          # restart or replacement.
+          gen_before=$(controller_generation)
+          i=0
+          while [ "$i" -lt 6 ]; do
+            sleep 5
+            i=$(( i + 1 ))
+            n=$(ready_backends "$adm")
+            [ "$n" -gt 0 ] || {
+              echo "SETUP FAILURE: $adm lost its ready backend during the stability window (sample $i)" >&2
+              kubectl -n "$ns" get pod -l "$sel" -o wide >&2 2>&1 || true
+              exit 1
+            }
+          done
+          gen_stable=$(controller_generation)
+          [ "$gen_stable" = "$gen_before" ] || {
+            echo "SETUP FAILURE: the ingress-nginx controller restarted or was replaced during the stability window" >&2
+            echo "  before: $gen_before" >&2
+            echo "  after:  $gen_stable" >&2
+            kubectl -n "$ns" get pod -l "$sel" -o wide >&2 2>&1 || true
+            exit 1
+          }
+
+          pod_ip=$(kubectl -n "$ns" get pod -l "$sel" \
+            -o jsonpath='{.items[0].status.podIP}')
+          hook_port=$(kubectl -n "$ns" get pod -l "$sel" \
+            -o jsonpath='{.items[0].spec.containers[0].ports[?(@.name=="webhook")].containerPort}')
+          [ -n "$pod_ip" ] || { echo "SETUP FAILURE: no controller Pod IP in $ns" >&2; exit 1; }
+          [ -n "$hook_port" ] || { echo "SETUP FAILURE: controller declares no webhook port" >&2; exit 1; }
+
+          echo "probing from $ns: expect reachable ${ctl}:${ctl_port}, denied ${adm}:${adm_port}, denied ${pod_ip}:${hook_port}"
+
+          kubectl -n "$ns" delete pod "$probe" --ignore-not-found --wait=true --timeout=60s
+          # busybox:musl is staged onto every node by hack/e2e-prepull-images.sh,
+          # so this adds no image pull. The securityContext satisfies the
+          # restricted PodSecurity profile, so the probe runs in a tenant
+          # namespace whatever level is enforced there.
+          kubectl -n "$ns" apply -f - <<EOF
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: ${probe}
+          spec:
+            restartPolicy: Never
+            automountServiceAccountToken: false
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 65534
+              runAsGroup: 65534
+              seccompProfile:
+                type: RuntimeDefault
+            containers:
+            - name: probe
+              image: busybox:musl
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              env:
+              - name: CTL_HOST
+                value: "${ctl}.${ns}.svc"
+              - name: CTL_PORT
+                value: "${ctl_port}"
+              - name: ADM_HOST
+                value: "${adm}.${ns}.svc"
+              - name: ADM_PORT
+                value: "${adm_port}"
+              - name: POD_IP
+                value: "${pod_ip}"
+              - name: HOOK_PORT
+                value: "${hook_port}"
+              command: ["sh", "-c"]
+              args:
+              # Measurement only, and always exit 0. The pod reports what it
+              # observed per destination; the script that started it holds the
+              # endpoint evidence and is the only place that can say why a
+              # connect was refused. Keeping the verdict out of here is also
+              # what stops "the probe could not run" from being read as "the
+              # assertion failed".
+              - |
+                set -u
+                reach() { nc -w 5 "\$1" "\$2" </dev/null >/dev/null 2>&1; }
+                report() {
+                  if reach "\$2" "\$3"; then
+                    echo "\$1 reachable \$2:\$3"
+                  else
+                    echo "\$1 unreachable \$2:\$3"
+                  fi
+                }
+                report CTL "\$CTL_HOST" "\$CTL_PORT"
+                report ADM "\$ADM_HOST" "\$ADM_PORT"
+                report HOOK "\$POD_IP" "\$HOOK_PORT"
+          EOF
+
+          # Wait for a terminal phase rather than a condition, and re-check the
+          # backend on every poll: a controller that dies mid-probe invalidates
+          # the deny verdicts, and this is the window it would die in.
+          deadline=$(( $(date +%s) + 180 ))
+          phase=""
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            n=$(ready_backends "$adm")
+            [ "$n" -gt 0 ] || {
+              echo "SETUP FAILURE: $adm lost its ready backend while the probe was running, so an unreachable webhook proves nothing" >&2
+              kubectl -n "$ns" get pod -l "$sel" -o wide >&2 2>&1 || true
+              kubectl -n "$ns" logs "$probe" >&2 2>&1 || true
+              exit 1
+            }
+            phase=$(kubectl -n "$ns" get pod "$probe" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            case "$phase" in Succeeded|Failed) break ;; esac
+            sleep 3
+          done
+
+          log=$(kubectl -n "$ns" logs "$probe" 2>&1 || true)
+          printf '%s\n' "$log"
+
+          # Postcondition, before the log is interpreted at all.
+          [ "$phase" = "Succeeded" ] || {
+            echo "SETUP FAILURE: the probe did not run to completion (phase=${phase:-unknown})" >&2
+            kubectl -n "$ns" describe pod "$probe" >&2 2>&1 || true
+            exit 1
+          }
+          gen_after=$(controller_generation)
+          [ "$gen_after" = "$gen_before" ] || {
+            echo "SETUP FAILURE: the ingress-nginx controller restarted or was replaced during the probe" >&2
+            echo "  before: $gen_before" >&2
+            echo "  after:  $gen_after" >&2
+            kubectl -n "$ns" get pod -l "$sel" -o wide >&2 2>&1 || true
+            exit 1
+          }
+          n=$(ready_backends "$adm")
+          [ "$n" -gt 0 ] || {
+            echo "SETUP FAILURE: $adm has no ready backend after the probe, so its unreachability proves nothing" >&2
+            exit 1
+          }
+
+          verdict() { printf '%s\n' "$log" | awk -v k="$1" '$1 == k { print $2; exit }'; }
+          ctl_seen=$(verdict CTL)
+          adm_seen=$(verdict ADM)
+          hook_seen=$(verdict HOOK)
+          for v in "$ctl_seen" "$adm_seen" "$hook_seen"; do
+            [ -n "$v" ] || {
+              echo "SETUP FAILURE: the probe did not report all three destinations" >&2
+              exit 1
+            }
+          done
+
+          # From here every branch is a real verdict: the destination had a live
+          # backend before, throughout and after, on pods that neither restarted
+          # nor were replaced.
+          rc=0
+          if [ "$ctl_seen" = reachable ]; then
+            echo "OK   unrelated 443 egress works (${ctl}:${ctl_port})"
+          else
+            echo "BUG  unrelated 443 egress DENIED to a live backend (${ctl}:${ctl_port}) -- the webhook deny is not scoped to the webhook port" >&2
+            rc=1
+          fi
+          if [ "$adm_seen" = unreachable ]; then
+            echo "OK   webhook denied through its Service ClusterIP"
+          else
+            echo "BUG  webhook reachable through its Service ClusterIP (${adm}:${adm_port})" >&2
+            rc=1
+          fi
+          if [ "$hook_seen" = unreachable ]; then
+            echo "OK   webhook denied on its backend port"
+          else
+            echo "BUG  webhook reachable directly on its backend port (${pod_ip}:${hook_port})" >&2
+            rc=1
+          fi
+          exit "$rc"
+        check:
+          ($error == null): true
+    finally:
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Pod
+          name: admission-deny-probe

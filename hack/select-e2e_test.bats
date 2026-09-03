@@ -867,6 +867,20 @@ assert_full_suite() {
     rm -rf "$tmp"
 }
 
+@test "an ingress-nginx change selects the gateway admission regression" {
+    # system/ingress-nginx is shared by the root ingress package, the tenant
+    # ingress application, and tenant Kubernetes clusters. The gateway suite
+    # owns the host-cluster Ingress admission regression, while the four
+    # Kubernetes suites cover the copies installed inside tenant clusters.
+    tmp=$(mktemp -d)
+    cp -r packages/core/platform/sources "$tmp/sources"
+    echo "packages/system/ingress-nginx/templates/admission-webhook-egress-policy.yaml" > "$tmp/diff"
+    output=$(hack/select-e2e.sh "$tmp/diff" "$tmp/sources")
+    assert_selection "an ingress-nginx change must exercise every installed copy" \
+        "$output" "gateway kubernetes-latest kubernetes-oidc-customconfig kubernetes-oidc-system kubernetes-previous"
+    rm -rf "$tmp"
+}
+
 @test "an etcd-operator change selects the etcd suite, not the whole run" {
     # cozystack.etcd-operator reached no runnable suite, so every change to the
     # operator ran all 21 -- 5 of the last 150 merged pull requests. The suite

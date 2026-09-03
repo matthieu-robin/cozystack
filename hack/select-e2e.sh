@@ -235,6 +235,11 @@ src_to_suites() {
     # not exist, is dropped by intersect_suites(), and a CDI change reaches
     # nothing runnable through it.
     vm-disk-application) echo vminstance ;;
+    # Both sources own system/ingress-nginx, and the gateway suite carries the
+    # legacy Ingress admission regression coverage. Without these explicit
+    # mappings their derived names point at suites that do not exist, so an
+    # ingress-only package change can omit the suite that exercises it.
+    ingress-application|ingress-nginx) echo gateway ;;
     kubernetes-application) echo "kubernetes-latest kubernetes-previous kubernetes-oidc-system kubernetes-oidc-customconfig" ;;
     securitygroup-controller) echo securitygroup ;;
     *-application) echo "${1%-application}" ;;
