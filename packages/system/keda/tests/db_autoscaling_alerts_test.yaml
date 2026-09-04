@@ -14,12 +14,30 @@ tests:
       - equal:
           path: spec.groups[0].name
           value: database-autoscaling.rules
-      # stuck scale-up (quota / unschedulable / unbindable PVC): desired > current
+      # stuck scale-up with a pod that exists but cannot run (unschedulable / unbindable
+      # PVC — both leave a Pending pod): desired > current AND a Pending CNPG pod
       - contains:
           path: spec.groups[0].rules
           content:
             alert: DatabaseAutoscalerScaleStuck
           any: true
+      # quota-rejected scale-up — the Pending-INDEPENDENT companion (design proposal
+      # §Failure): a ResourceQuota refuses the pod at admission, so no pod is created and
+      # ScaleStuck's Pending intersection misses it. Keyed on desired > count(CNPG pods).
+      - contains:
+          path: spec.groups[0].rules
+          content:
+            alert: DatabaseAutoscalerScaleBlocked
+          any: true
+      # ScaleBlocked (rules[1]) compares desired to the CNPG pod count and must NOT depend
+      # on a Pending phase (that is ScaleStuck's job) — otherwise it would miss the very
+      # case it exists for.
+      - matchRegex:
+          path: spec.groups[0].rules[1].expr
+          pattern: count by \(namespace\) \(kube_pod_labels\{.*label_cnpg_io_cluster
+      - notMatchRegex:
+          path: spec.groups[0].rules[1].expr
+          pattern: phase="Pending"
       # at the ceiling: desired >= maxReplicas (NOT the ScalingLimited condition, which is
       # also true at the floor for an idle cluster and would make this fire on quiet DBs)
       - contains:
@@ -28,11 +46,11 @@ tests:
             alert: DatabaseAutoscalerAtMax
           any: true
       - matchRegex:
-          path: spec.groups[0].rules[1].expr
+          path: spec.groups[0].rules[2].expr
           pattern: kube_horizontalpodautoscaler_spec_max_replicas
       # must NOT key on ScalingLimited (that regressed to firing at the floor)
       - notMatchRegex:
-          path: spec.groups[0].rules[1].expr
+          path: spec.groups[0].rules[2].expr
           pattern: ScalingLimited
       # KEDA cannot read the metric (vmselect down / bad query): scaler errors
       - contains:
@@ -45,7 +63,7 @@ tests:
       # (verified on a live 2.20.2 operator). A regression here makes the alert
       # silently never fire.
       - matchRegex:
-          path: spec.groups[0].rules[2].expr
+          path: spec.groups[0].rules[3].expr
           pattern: keda_scaled_object_errors_total
       # operator-down alert covers the "ScaledObject never became an HPA" gap
       - contains:
@@ -54,13 +72,13 @@ tests:
             alert: DatabaseAutoscalerKedaOperatorDown
           any: true
       - matchRegex:
-          path: spec.groups[0].rules[3].expr
+          path: spec.groups[0].rules[4].expr
           pattern: absent\(keda_build_info\)
       # ...gated on keda-hpa-* existence so it cannot false-fire in a tenant vmselect that
       # never scrapes keda_build_info (own-monitoring tenants); fires only where KEDA HPAs
       # exist. A bare absent() would alert forever in every such tenant.
       - matchRegex:
-          path: spec.groups[0].rules[3].expr
+          path: spec.groups[0].rules[4].expr
           pattern: count\(kube_horizontalpodautoscaler_status_current_replicas\{.*keda-hpa
       # ScaleStuck must intersect with a Pending pod so a healthy long basebackup
       # (Running pod, desired > current for >15m) does not false-fire

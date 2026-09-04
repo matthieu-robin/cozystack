@@ -26,13 +26,18 @@ spec:
   - name: database-autoscaling.rules
     rules:
     {{- /*
-    Scale-up genuinely stuck: quota-rejected standby, unbindable PVC, or
-    unschedulable pod. desired > current alone would also fire on every healthy
-    load-driven scale-up, because a new CNPG standby joins via a full basebackup
-    that routinely exceeds 15m while the pod is Running (not Ready) — so intersect
-    with an actually-Pending CNPG cluster pod, which a healthy clone is not. The
-    Pending term is scoped to CNPG pods via label_cnpg_io_cluster so an unrelated
-    Pending pod co-resident in the tenant namespace does not trip it.
+    Scale-up stuck with a pod that exists but cannot run: unbindable PVC or an
+    unschedulable pod — both leave an actually-Pending CNPG pod. desired > current
+    alone would also fire on every healthy load-driven scale-up, because a new CNPG
+    standby joins via a full basebackup that routinely exceeds 15m while the pod is
+    Running (not Ready) — so intersect with an actually-Pending CNPG cluster pod,
+    which a healthy clone is not. The Pending term is scoped to CNPG pods via
+    label_cnpg_io_cluster so an unrelated Pending pod co-resident in the tenant
+    namespace does not trip it.
+    NOTE: the quota-rejected case is NOT caught here. A ResourceQuota refuses the
+    standby pod at admission, so no pod object is ever created and there is no
+    Pending pod to intersect with — it is caught by DatabaseAutoscalerScaleBlocked
+    below, keyed on desired > (count of CNPG pods) instead of a Pending phase.
     There is no automatic rollback (see the design proposal); this is the operator's
     signal to resolve it.
 
@@ -63,7 +68,34 @@ spec:
         severity: warning
       annotations:
         summary: Database autoscaler cannot reach its desired replica count.
-        description: HPA {{ "{{ $labels.horizontalpodautoscaler }}" }} in namespace {{ "{{ $labels.namespace }}" }} has wanted more replicas than are available for 15m while a pod in the namespace is Pending (stuck scale-up — likely quota, unbindable PVC, or unschedulable pod, not a healthy basebackup).
+        description: HPA {{ "{{ $labels.horizontalpodautoscaler }}" }} in namespace {{ "{{ $labels.namespace }}" }} has wanted more replicas than are available for 15m while a pod in the namespace is Pending (stuck scale-up — an unbindable PVC or an unschedulable pod, not a healthy basebackup).
+    {{- /*
+    Scale-up blocked at admission (the Pending-independent case the design proposal
+    §Failure requires): a ResourceQuota (or any admission webhook) refuses the new
+    standby pod, so no pod object is created at all and DatabaseAutoscalerScaleStuck's
+    Pending intersection misses it. Key instead on the HPA wanting more instances than
+    there are CNPG pods: desired_replicas > count(CNPG cluster pods in the namespace).
+    A healthy basebackup does NOT trip this — its pod IS created (Running, cloning), so
+    the pod count already equals desired; only a pod that was never admitted leaves the
+    count short. An unschedulable / unbindable-PVC pod is also created (Pending), so it
+    is counted here too and does not double-fire — that path is DatabaseAutoscalerScaleStuck's.
+    Scoped to CNPG pods via label_cnpg_io_cluster and joined on namespace (the same
+    one-autoscaled-DB-per-namespace assumption the other rules make; with two CNPG
+    clusters in one namespace the summed pod count can mask a single cluster's block).
+    If kube_pod_labels is absent entirely (broken KSM) the join drops the series rather
+    than firing — that pipeline break surfaces as a KEDA scaler error instead.
+    */}}
+    - alert: DatabaseAutoscalerScaleBlocked
+      expr: |-
+        kube_horizontalpodautoscaler_status_desired_replicas{job="kube-state-metrics",horizontalpodautoscaler=~"keda-hpa-.*"}
+        > on(namespace) group_left()
+        count by (namespace) (kube_pod_labels{job="kube-state-metrics",label_cnpg_io_cluster!=""})
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: Database autoscaler is blocked from creating a replica at admission.
+        description: HPA {{ "{{ $labels.horizontalpodautoscaler }}" }} in namespace {{ "{{ $labels.namespace }}" }} has wanted more instances than there are CNPG pods for 15m, and no pod is Pending — the replica is being refused at admission (most likely a ResourceQuota that leaves no Pending pod to observe). Raise the tenant quota or lower autoscaling.maxReplicas.
     {{- /*
     Pinned at the configured maximum under sustained load. NOT keyed on the HPA's
     ScalingLimited condition: that is true in BOTH clamp directions (TooManyReplicas at

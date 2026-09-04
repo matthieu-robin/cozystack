@@ -34,6 +34,19 @@ keda:
     operator:
       restrict:
         secret: true
+  # Restrict the cluster-privileged operator's egress (design proposal §Security — SSRF
+  # hardening for autoscaling.serverAddress). The operator fetches each ScaledObject's
+  # serverAddress every polling interval; the postgres chart already refuses a non-in-cluster
+  # serverAddress at render, and this is the defense-in-depth second half. flavor "cilium"
+  # (cozystack's CNI) renders a CiliumNetworkPolicy whose egress is toEntities
+  # [kube-apiserver, cluster] only: the apiserver and in-cluster endpoints (CoreDNS, vmselect,
+  # CNPG pods) stay reachable, while `world` (off-cluster hosts) is denied — so the operator
+  # cannot be turned into an SSRF relay to a metadata endpoint or an external address. The
+  # kube-apiserver entity covers the control plane however it is addressed, so unlike a raw
+  # CIDR egress policy this does not risk starving the operator's apiserver access.
+  networkPolicy:
+    enabled: true
+    flavor: cilium
   # NOTE (image digests): the three KEDA images render tag-only
   # (kedacore/keda{,-metrics-apiserver,-admission-webhooks}:<appVersion>) — the vendored
   # chart's image helper is `repository:tag` with no digest field, so a @sha256 pin cannot
