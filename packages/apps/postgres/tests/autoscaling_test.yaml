@@ -216,6 +216,52 @@ tests:
           path: spec.triggers[0].metadata.serverAddress
           value: http://custom-vmselect.example.svc:8481/select/0/prometheus
 
+  - it: refuses an off-cluster serverAddress (SSRF guard on the metric destination)
+    templates:
+      - templates/scaledobject.yaml
+    set:
+      autoscaling:
+        enabled: true
+        serverAddress: http://169.254.169.254/latest/meta-data
+        minReplicas: 2
+        maxReplicas: 6
+        target: 150
+    asserts:
+      # The cluster-privileged KEDA operator fetches serverAddress every poll; a tenant must
+      # not be able to point it at a cloud metadata endpoint or an external host. Only an
+      # in-cluster Service DNS name (…svc[.<domain>]) is accepted.
+      - failedTemplate:
+          errorMessage: 'postgres: autoscaling.serverAddress host "169.254.169.254" is not an in-cluster Service DNS name (must end in .svc, e.g. vmselect-shortterm.<namespace>.svc). An external host or IP is refused so the cluster-privileged KEDA operator cannot be used as an SSRF relay to a metadata endpoint or another tenant''s address.'
+
+  - it: refuses an external-hostname serverAddress
+    templates:
+      - templates/scaledobject.yaml
+    set:
+      autoscaling:
+        enabled: true
+        serverAddress: https://evil.example.com/api/v1/query
+        minReplicas: 2
+        maxReplicas: 6
+        target: 150
+    asserts:
+      - failedTemplate:
+          errorMessage: 'postgres: autoscaling.serverAddress host "evil.example.com" is not an in-cluster Service DNS name (must end in .svc, e.g. vmselect-shortterm.<namespace>.svc). An external host or IP is refused so the cluster-privileged KEDA operator cannot be used as an SSRF relay to a metadata endpoint or another tenant''s address.'
+
+  - it: accepts an in-cluster serverAddress that carries the cluster domain (…svc.<domain>)
+    templates:
+      - templates/scaledobject.yaml
+    set:
+      autoscaling:
+        enabled: true
+        serverAddress: http://vmselect-shortterm.my-mon.svc.cozy.local:8481/select/0/prometheus
+        minReplicas: 2
+        maxReplicas: 6
+        target: 150
+    asserts:
+      - equal:
+          path: spec.triggers[0].metadata.serverAddress
+          value: http://vmselect-shortterm.my-mon.svc.cozy.local:8481/select/0/prometheus
+
   - it: fails closed when the quorum floor exceeds maxReplicas rather than silently running an unbounded count
     templates:
       - templates/scaledobject.yaml
@@ -234,6 +280,27 @@ tests:
       # to raise maxReplicas.
       - failedTemplate:
           errorMessage: "postgres: the effective minimum instance count (7 = max(minReplicas 2, maxSyncReplicas+1 7, 2)) exceeds autoscaling.maxReplicas (6); raise maxReplicas to at least the quorum floor."
+
+  - it: fails closed when replicas exceeds maxReplicas (cold-start above-ceiling shed guard)
+    templates:
+      - templates/scaledobject.yaml
+    set:
+      replicas: 8
+      autoscaling:
+        enabled: true
+        minReplicas: 2
+        maxReplicas: 6
+        target: 150
+      quorum:
+        maxSyncReplicas: 0
+    asserts:
+      # effectiveMin = 2 <= maxReplicas 6 (the floor>max guard passes), but the resting/seed
+      # count replicas 8 exceeds maxReplicas 6: on enable (or dry-run/transition) the stock
+      # HPA's currentReplicas > maxReplicaCount branch writes /scale = maxReplicaCount
+      # unconditionally, cutting the live count straight to 6 past the scale-down pacing.
+      # Fail closed rather than shed standbys + PVCs silently.
+      - failedTemplate:
+          errorMessage: "postgres: replicas (8) exceeds autoscaling.maxReplicas (6); enabling autoscaling (or dry-run/transition) would make KEDA's HPA cut the live count straight to maxReplicas in one step, shedding the surplus standbys and their PVCs past the scale-down pacing. Raise autoscaling.maxReplicas to at least replicas, or lower replicas deliberately first."
 
   - it: rejects a stray maxReplicas of 0 (effective floor > max) rather than coercing or clamping it
     templates:

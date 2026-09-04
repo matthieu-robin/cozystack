@@ -27,6 +27,18 @@ CNPG collapse the cluster to 1 instance. Stop with an actionable message instead
 {{- if gt $emin (int .Values.autoscaling.maxReplicas) }}
 {{- fail (printf "postgres: the effective minimum instance count (%d = max(minReplicas %d, maxSyncReplicas+1 %d, 2)) exceeds autoscaling.maxReplicas (%d); raise maxReplicas to at least the quorum floor." $emin (int .Values.autoscaling.minReplicas) (add (int .Values.quorum.maxSyncReplicas) 1) (int .Values.autoscaling.maxReplicas)) }}
 {{- end }}
+{{- /* Reject a resting/seed count above the ceiling. `replicas` is the seed the chart
+       renders under autoscaling (max(replicas, effectiveMin)) and the count restored on
+       disable; if it exceeds maxReplicas the stock HPA's `currentReplicas > maxReplicaCount`
+       branch writes /scale = maxReplicaCount UNCONDITIONALLY on the first reconcile — even
+       under the both-direction pause of dryRun/transition, which that branch never consults —
+       cutting the live count straight to maxReplicas in one step and shedding the surplus
+       standbys and their PVCs past the one-per-period scaleDown pacing (the above-max branch
+       never reaches the rendered policies). Fail closed, mirroring the effectiveMin>maxReplicas
+       guard above (design proposal §Upgrade names this the remaining render-guard gap). */ -}}
+{{- if gt (int .Values.replicas) (int .Values.autoscaling.maxReplicas) }}
+{{- fail (printf "postgres: replicas (%d) exceeds autoscaling.maxReplicas (%d); enabling autoscaling (or dry-run/transition) would make KEDA's HPA cut the live count straight to maxReplicas in one step, shedding the surplus standbys and their PVCs past the scale-down pacing. Raise autoscaling.maxReplicas to at least replicas, or lower replicas deliberately first." (int .Values.replicas) (int .Values.autoscaling.maxReplicas)) }}
+{{- end }}
 {{- /* The trigger query is served from vmselect in the tenant's monitoring namespace.
        If it is unset the serverAddress would render as the malformed
        `vmselect-shortterm..svc:8481`, which surfaces late as a KEDA scaler error
@@ -34,6 +46,20 @@ CNPG collapse the cluster to 1 instance. Stop with an actionable message instead
        (mirroring the guards above) for a hand-rendered / misconfigured tenant. */ -}}
 {{- if not (include "cozy-lib.ns-monitoring" .) }}
 {{- fail "postgres: autoscaling requires a monitoring namespace to reach vmselect, but none is set (_namespace.monitoring is empty). The platform normally injects it; ensure the tenant has monitoring enabled." }}
+{{- end }}
+{{- /* SSRF guard on the trigger destination (design proposal §Security). The
+       cluster-privileged KEDA operator fetches serverAddress every polling interval,
+       so a tenant that set it to a cloud metadata endpoint or an external/other-tenant
+       address could read reachability back off the ScaledObject status. The query BODY
+       is namespace-scoped by construction; this restricts the DESTINATION to an
+       in-cluster Service DNS name (…svc[.<clusterdomain>]) — the only shape a legitimate
+       vmselect takes — and refuses anything else. Defense-in-depth: the keda package also
+       enables an egress NetworkPolicy that denies the operator any off-cluster egress. */ -}}
+{{- $serverAddress := include "postgres.autoscaling.serverAddress" . }}
+{{- $saNoScheme := regexReplaceAll "^[a-zA-Z][a-zA-Z0-9+.-]*://" $serverAddress "" }}
+{{- $saHost := regexReplaceAll "[:/].*$" $saNoScheme "" }}
+{{- if not (regexMatch "^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?\\.svc(\\.[a-zA-Z0-9.-]+)?$" $saHost) }}
+{{- fail (printf "postgres: autoscaling.serverAddress host %q is not an in-cluster Service DNS name (must end in .svc, e.g. vmselect-shortterm.<namespace>.svc). An external host or IP is refused so the cluster-privileged KEDA operator cannot be used as an SSRF relay to a metadata endpoint or another tenant's address." $saHost) }}
 {{- end }}
 {{- include "cozy-lib.keda.scaledObject" (dict
      "name" .Release.Name
