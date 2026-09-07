@@ -1,0 +1,23 @@
+suite: postgres-rd ApplicationDefinition
+release:
+  name: postgres-rd
+  namespace: cozy-system
+templates:
+  - templates/cozyrd.yaml
+tests:
+  # The postgres ApplicationDefinition carries release.cozystack.io/helm-server-side-apply:
+  # "false" — the load-bearing switch for read-replica autoscaling. Under the helm-controller
+  # default (server-side apply) the rendered spec.instances would force-own and revert KEDA's
+  # live /scale value on every reconcile, collapsing an autoscaled cluster. The Go builder
+  # test (rest_serversideapply_test.go) pins the plumbing that CONSUMES the annotation but not
+  # the annotation itself; this guards it at the point it is set, so dropping it goes red.
+  - it: forces client-side Helm apply on the postgres ApplicationDefinition
+    documentSelector:
+      path: metadata.name
+      value: postgres
+    asserts:
+      - isKind:
+          of: ApplicationDefinition
+      - equal:
+          path: metadata.annotations["release.cozystack.io/helm-server-side-apply"]
+          value: "false"
