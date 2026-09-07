@@ -14,6 +14,13 @@ keda:
   # package would delete the ScaledObject CRD and cascade-delete EVERY tenant's
   # ScaledObject, wedging every autoscaled database at its next reconcile. resource-policy
   # keep orphans the CRDs instead; a deliberate CRD cleanup is then a manual step.
+  # TEARDOWN ORDER: `keep` covers the CRDs, not the finalizer. KEDA stamps
+  # finalizer.keda.sh on every ScaledObject and only the running operator removes it, so if
+  # the package is removed while ScaledObjects still exist, a tenant deleting their Postgres
+  # app gets a ScaledObject stuck Terminating and a HelmRelease uninstall that hangs on it,
+  # recoverable only by an admin finalizer patch. Before removing the keda package, set
+  # autoscaling.enabled: false on every tenant Postgres (which deletes the ScaledObjects
+  # while the operator is still up to clear their finalizers).
   crds:
     additionalAnnotations:
       helm.sh/resource-policy: keep
