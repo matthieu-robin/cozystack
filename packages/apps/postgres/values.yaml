@@ -191,6 +191,15 @@ quorum:
 ##   (2) RAISING `minReplicas`/`quorum.maxSyncReplicas` so the floor exceeds both the live
 ##       count and `replicas`: the seed rises and the live count is raised to it. Lowering
 ##       the floor is a no-op while `replicas` >= the new floor.
+## HAZARD (either case, under load): the rebase compares the newly-rendered seed to the
+## PREVIOUS rendered seed — never to KEDA's live count. So whenever load has scaled the live
+## count ABOVE the seed and any chart change re-renders a seed still at/below that live count
+## (lowering `replicas`, OR raising the floor to a value still below the live count), the
+## re-apply cuts `.spec.instances` straight down to the seed in ONE step — shedding the
+## surplus standbys and their PVCs past the scaleDown pacing — before the HPA re-clones them
+## back up. This is the same one-step shed the lowering-`maxReplicas` HAZARD warns about, but
+## triggered by a floor/replicas change rather than the ceiling. Stage the live count into
+## `replicas` first (below) to avoid the transient.
 ## To rebase deliberately with no transient: suspend the HelmRelease, pin the live count
 ## with `kubectl scale cluster.postgresql.cnpg.io/<name> --replicas=<live count>` and set
 ## `.Values.replicas` to match (or use the two-phase `transition` flow), apply, then

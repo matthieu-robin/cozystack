@@ -220,11 +220,17 @@ provisioning so it no longer errors there; it stays opt-in / not-live-validated.
        while the brake is engaged, nudging desired up instead of holding it. */ -}}
 {{- $frozen := printf "(count(kube_pod_labels{namespace=%q,label_cnpg_io_cluster=%q,label_cnpg_io_instance_role=~\".+\"}) * %v)" $ns $rel $target -}}
 {{- /* base when not braking, frozen (= currentInstances * target) when braking.
-       The frozen summand is floored with `or vector(0)`: PromQL `+` is a set
-       intersection, so if count(kube_pod_labels) is momentarily empty (a
-       kube-state-metrics scrape gap) an unfloored frozen term would empty the
-       whole sum and defeat the base term's own `or vector(0)`, silently pinning
-       desired to the floor under real load. Flooring keeps base + 0 = base. */ -}}
+       The frozen summand carries a defensive `or vector(0)`, but note it is a no-op
+       given the surrounding expression, NOT a floor that ever changes the result: the
+       frozen count selects the SAME kube_pod_labels{...instance_role=~".+"} series as the
+       idle-floor gate in $load, and $base's own load term joins on kube_pod_labels too, so
+       within one evaluation base and frozen are empty or non-empty TOGETHER. When base is
+       non-empty frozen is non-empty (the `or vector(0)` is unused); when base is empty
+       (broken KSM pod-label pipeline) frozen is empty and base*(1-braking) is already
+       empty, so the sum is empty either way (→ ignoreNullValues=false → KEDA
+       FailedGetExternalMetric → HPA holds — the intended fail-safe). It is kept only as an
+       explicit belt-and-braces marker; there is no reachable state where base is non-empty
+       while the frozen count is empty (base cannot outlive the kube_pod_labels it joins on). */ -}}
 {{- printf "(%s) * (1 - %s) + ((%s * %s) or vector(0))" $base $braking $frozen $braking -}}
 {{- end -}}
 {{- end -}}
