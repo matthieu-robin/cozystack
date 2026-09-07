@@ -290,16 +290,19 @@ metadata:
   labels:
     workloads.cozystack.io/resource-preset: {{ .Values.resourcesPreset | quote }}
 spec:
-  {{- /* Under active autoscaling the expected-replica count tracks the quorum FLOOR
+  {{- /* Under active autoscaling the desired-replica count is set to the quorum FLOOR
          (effectiveMin), NOT the seeded spec.instances (activeSeed = max(replicas,
-         effectiveMin)) and not KEDA's live autoscaled target. This is deliberate: the
-         seed is only the starting count; KEDA owns the runtime count via /scale and
-         legitimately scales DOWN to effectiveMin under low load. Expecting activeSeed
-         (which can exceed effectiveMin when replicas > floor) would false-flag
-         under-provisioning every time KEDA idles the cluster to its floor. effectiveMin
-         is the true minimum KEDA never goes below, so actual >= expected always holds and
-         the monitor never false-alarms. Between the floor and the live desired count it
-         does not flag under-provisioning; health is still gated by minReplicas: 1. */}}
+         effectiveMin)) and not KEDA's live autoscaled target: the seed is only the
+         starting count, KEDA owns the runtime count via /scale and legitimately idles the
+         cluster DOWN to effectiveMin under low load. NOTE the health decision does not
+         actually read this field today — WorkloadMonitorReconciler gates Status.Operational
+         solely on availableReplicas < minReplicas (below), so with minReplicas: 1 an idle
+         autoscaled cluster never false-alarms regardless of what replicas says. replicas is
+         the declared desired target (see the field doc: "desired number of replicas");
+         pinning it to effectiveMin keeps that target honest — the floor KEDA never goes
+         below, so should a future reconciler compare desired vs observed it still holds
+         actual >= desired, rather than false-flagging every idle-to-floor as the live
+         count (or the >floor seed) would. */}}
   replicas: {{ if $autoscaling }}{{ include "postgres.autoscaling.effectiveMin" . }}{{ else }}{{ .Values.replicas }}{{ end }}
   minReplicas: 1
   kind: postgres
