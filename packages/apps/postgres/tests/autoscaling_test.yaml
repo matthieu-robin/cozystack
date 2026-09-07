@@ -202,7 +202,7 @@ tests:
     set:
       autoscaling:
         enabled: true
-        serverAddress: http://custom-vmselect.example.svc:8481/select/0/prometheus
+        serverAddress: http://custom-vmselect.tenant-acme.svc:8481/select/0/prometheus
         minReplicas: 2
         maxReplicas: 6
         target: 150
@@ -211,10 +211,11 @@ tests:
     asserts:
       # A tenant whose derived vmselect lacks kube_pod_labels (monitoring: true) points
       # serverAddress at one that holds both series; the override wins over the derived
-      # per-tenant address.
+      # per-tenant address. The namespace must be within the tenant's own subtree
+      # (here its own namespace, tenant-acme) — the SSRF namespace-pin allows own/parent/root.
       - equal:
           path: spec.triggers[0].metadata.serverAddress
-          value: http://custom-vmselect.example.svc:8481/select/0/prometheus
+          value: http://custom-vmselect.tenant-acme.svc:8481/select/0/prometheus
 
   - it: refuses an off-cluster serverAddress (SSRF guard on the metric destination)
     templates:
@@ -270,14 +271,61 @@ tests:
     set:
       autoscaling:
         enabled: true
-        serverAddress: http://vmselect-shortterm.my-mon.svc.cozy.local:8481/select/0/prometheus
+        # root namespace (tenant-root) is in the tenant's subtree and carries the cluster
+        # domain suffix; both the domain anchor and the namespace-pin accept it.
+        serverAddress: http://vmselect-shortterm.tenant-root.svc.cozy.local:8481/select/0/prometheus
         minReplicas: 2
         maxReplicas: 6
         target: 150
     asserts:
       - equal:
           path: spec.triggers[0].metadata.serverAddress
-          value: http://vmselect-shortterm.my-mon.svc.cozy.local:8481/select/0/prometheus
+          value: http://vmselect-shortterm.tenant-root.svc.cozy.local:8481/select/0/prometheus
+
+  - it: refuses a cross-namespace serverAddress outside the tenant subtree (cross-tenant SSRF)
+    templates:
+      - templates/scaledobject.yaml
+    set:
+      autoscaling:
+        enabled: true
+        # valid in-cluster .svc form AND correct cluster domain, but the namespace belongs to
+        # a sibling tenant the operator must not be pointed at — rejected by the namespace-pin.
+        serverAddress: http://vmselect-shortterm.tenant-sibling.svc.cozy.local:8481/select/0/prometheus
+        minReplicas: 2
+        maxReplicas: 6
+        target: 150
+    asserts:
+      - failedTemplate:
+          errorMessage: 'postgres: autoscaling.serverAddress namespace "tenant-sibling" is outside this tenant''s subtree [tenant-acme tenant-root]; the cluster-privileged KEDA operator may only be pointed at a vmselect in the tenant''s own, parent, or root namespace, not a sibling tenant''s or a system namespace''s Service.'
+
+  - it: refuses a userinfo-smuggled external host (…svc:port@evil.example.com)
+    templates:
+      - templates/scaledobject.yaml
+    set:
+      autoscaling:
+        enabled: true
+        # the userinfo (before @) is a valid-looking .svc name, but net/url dials the host
+        # AFTER the @; authority parsing extracts evil.example.com and rejects it.
+        serverAddress: http://vmselect-shortterm.tenant-acme.svc:8481@evil.example.com/api/v1/query
+        minReplicas: 2
+        maxReplicas: 6
+        target: 150
+    asserts:
+      - failedTemplate:
+          errorMessage: 'postgres: autoscaling.serverAddress host "evil.example.com" is not an in-cluster Service DNS name (must be <service>.<namespace>.svc or ...svc.cozy.local). An external host or IP is refused so the cluster-privileged KEDA operator cannot be used as an SSRF relay to a metadata endpoint or another tenant''s address.'
+
+  - it: fails closed when maxReplicas exceeds the absolute read-replica ceiling (resource-exhaustion cap)
+    templates:
+      - templates/scaledobject.yaml
+    set:
+      autoscaling:
+        enabled: true
+        minReplicas: 2
+        maxReplicas: 100000
+        target: 150
+    asserts:
+      - failedTemplate:
+          errorMessage: "postgres: autoscaling.maxReplicas (100000) exceeds the maximum of 100 read replicas; a higher ceiling is a platform-policy decision, not a per-tenant setting."
 
   - it: fails closed when the quorum floor exceeds maxReplicas rather than silently running an unbounded count
     templates:

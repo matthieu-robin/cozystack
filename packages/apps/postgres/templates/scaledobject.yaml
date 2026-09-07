@@ -39,6 +39,19 @@ CNPG collapse the cluster to 1 instance. Stop with an actionable message instead
 {{- if gt (int .Values.replicas) (int .Values.autoscaling.maxReplicas) }}
 {{- fail (printf "postgres: replicas (%d) exceeds autoscaling.maxReplicas (%d); enabling autoscaling (or dry-run/transition) would make KEDA's HPA cut the live count straight to maxReplicas in one step, shedding the surplus standbys and their PVCs past the scale-down pacing. Raise autoscaling.maxReplicas to at least replicas, or lower replicas deliberately first." (int .Values.replicas) (int .Values.autoscaling.maxReplicas)) }}
 {{- end }}
+{{- /* Absolute ceiling on the tenant-facing maxReplicas. The schema/CRD carry no
+       `maximum` (cozyvalues-gen emits no numeric bound) and the aggregated apiserver does
+       not range-validate the Application CR, so this render guard is the only bound; the
+       guards above reject only a floor ABOVE maxReplicas, nothing caps maxReplicas itself.
+       Without this a tenant could set autoscaling.maxReplicas: 100000 and, under load,
+       drive KEDA to scale CNPG toward that many instances — a resource-exhaustion / cost
+       bomb bounded only by a ResourceQuota that may not exist. Fail closed above a sane
+       read-replica ceiling; a deployment that genuinely needs more is a platform-policy
+       decision, not a per-tenant knob. */ -}}
+{{- $maxReplicasCeiling := 100 }}
+{{- if gt (int .Values.autoscaling.maxReplicas) $maxReplicasCeiling }}
+{{- fail (printf "postgres: autoscaling.maxReplicas (%d) exceeds the maximum of %d read replicas; a higher ceiling is a platform-policy decision, not a per-tenant setting." (int .Values.autoscaling.maxReplicas) $maxReplicasCeiling) }}
+{{- end }}
 {{- /* The trigger query is served from vmselect in the tenant's monitoring namespace.
        If it is unset the serverAddress would render as the malformed
        `vmselect-shortterm..svc:8481`, which surfaces late as a KEDA scaler error
@@ -48,20 +61,29 @@ CNPG collapse the cluster to 1 instance. Stop with an actionable message instead
 {{- fail "postgres: autoscaling requires a monitoring namespace to reach vmselect, but none is set (_namespace.monitoring is empty). The platform normally injects it; ensure the tenant has monitoring enabled." }}
 {{- end }}
 {{- /* SSRF guard on the trigger destination (design proposal §Security). The
-       cluster-privileged KEDA operator fetches serverAddress every polling interval,
-       so a tenant that set it to a cloud metadata endpoint or an external/other-tenant
-       address could read reachability back off the ScaledObject status. The query BODY
-       is namespace-scoped by construction; this restricts the DESTINATION to an
-       in-cluster Service DNS name (…svc[.<clusterdomain>]) — the only shape a legitimate
-       vmselect takes — and refuses anything else. Defense-in-depth: the keda package also
-       enables an egress NetworkPolicy that denies the operator any off-cluster egress.
-       The optional suffix is anchored to THIS cluster's domain, not an arbitrary dotted
-       tail: an unanchored `(\.[a-zA-Z0-9.-]+)?` still accepts x.svc.attacker.com (a `.svc`
-       label followed by any external domain), so the guard would pass an off-cluster host.
+       cluster-privileged KEDA operator fetches serverAddress every polling interval, so a
+       tenant-set value is attacker-controlled. This guard enforces two things and NOT more —
+       do not read it as "refuses everything unsafe":
+         1. the host is an in-cluster Service DNS name (<svc>.<ns>.svc[.<clusterDomain>]),
+            with the optional suffix anchored to THIS cluster's domain (not an arbitrary
+            dotted tail — an unanchored `(\.[a-zA-Z0-9.-]+)?` would accept x.svc.attacker.com);
+         2. the <ns> segment is within the tenant's own subtree (its namespace + parents +
+            root, via cozy-lib.rbac.allParentTenantsAndThis) — the only namespaces whose
+            vmselect the tenant is entitled to read. Without (2) a tenant could point the
+            operator at a sibling tenant's or a system namespace's `.svc` (a blind in-cluster
+            SSRF relay); the egress CiliumNetworkPolicy does NOT stop that (its `cluster`
+            entity permits all in-cluster egress) — it only denies off-cluster, which is the
+            defense-in-depth backstop for (1).
+       The host is parsed as a URL authority (strip scheme, path/query/fragment, userinfo up
+       to the last `@`, then the port) — NOT by truncating at the first `:`/`/`, which a
+       `http://vmselect.<ns>.svc:1@evil.example.com/` userinfo payload defeats (the truncated
+       text passes the .svc check while net/url dials the host after the `@`).
        cluster-domain rides _cluster (platform apps.yaml, from networking.clusterDomain). */ -}}
 {{- $serverAddress := include "postgres.autoscaling.serverAddress" . }}
 {{- $saNoScheme := regexReplaceAll "^[a-zA-Z][a-zA-Z0-9+.-]*://" $serverAddress "" }}
-{{- $saHost := regexReplaceAll "[:/].*$" $saNoScheme "" }}
+{{- $saAuthority := regexReplaceAll "[/?#].*$" $saNoScheme "" }}
+{{- $saAfterUser := regexReplaceAll "^.*@" $saAuthority "" }}
+{{- $saHost := regexReplaceAll ":[0-9]*$" $saAfterUser "" }}
 {{- $clusterDomain := index (.Values._cluster | default dict) "cluster-domain" }}
 {{- $domainSuffix := "" }}
 {{- if $clusterDomain }}
@@ -70,6 +92,14 @@ CNPG collapse the cluster to 1 instance. Stop with an actionable message instead
 {{- $hostRe := printf "^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?\\.svc%s$" $domainSuffix }}
 {{- if not (regexMatch $hostRe $saHost) }}
 {{- fail (printf "postgres: autoscaling.serverAddress host %q is not an in-cluster Service DNS name (must be <service>.<namespace>.svc or ...svc.%s). An external host or IP is refused so the cluster-privileged KEDA operator cannot be used as an SSRF relay to a metadata endpoint or another tenant's address." $saHost (default "<cluster-domain>" $clusterDomain)) }}
+{{- end }}
+{{- /* Namespace-pin: the <ns> label of the host must be one the tenant may read from.
+       API-OWNER GATE: this narrows what a tenant may set in autoscaling.serverAddress
+       (own subtree only) — a multi-tenancy semantics change; needs @lllamnyp/@kvaps sign-off. */ -}}
+{{- $svcNs := regexReplaceAll "^.*\\.([^.]+)\\.svc(\\..*)?$" $saHost "${1}" }}
+{{- $allowedNs := include "cozy-lib.rbac.allParentTenantsAndThis" .Release.Namespace | fromYamlArray }}
+{{- if not (has $svcNs $allowedNs) }}
+{{- fail (printf "postgres: autoscaling.serverAddress namespace %q is outside this tenant's subtree %v; the cluster-privileged KEDA operator may only be pointed at a vmselect in the tenant's own, parent, or root namespace, not a sibling tenant's or a system namespace's Service." $svcNs $allowedNs) }}
 {{- end }}
 {{- include "cozy-lib.keda.scaledObject" (dict
      "name" .Release.Name
