@@ -248,7 +248,7 @@
           "default": 2
         },
         "serverAddress": {
-          "description": "Override the Prometheus/vmselect URL the ScaledObject queries. Empty (default) derives `http://vmselect-shortterm.\u003cmonitoring-ns\u003e.svc:8481/select/0/prometheus`. Set it when the derived vmselect does not hold both the CNPG metrics and kube_pod_labels (e.g. `monitoring: true` tenants, or a non-default `metricsStorages` name).",
+          "description": "Override the Prometheus/vmselect URL the ScaledObject queries. Empty (default) derives `http://vmselect-shortterm.\u003cmonitoring-ns\u003e.svc:8481/select/0/prometheus`. Set it when the derived vmselect does not hold both the CNPG metrics and kube_pod_labels (e.g. `monitoring: true` tenants, or a non-default `metricsStorages` name). SSRF constraint: the host must be an in-cluster Service DNS name (`\u003csvc\u003e.\u003cns\u003e.svc[.\u003cclusterDomain\u003e]`) whose namespace is within the tenant's own subtree (its namespace, its parents, or `tenant-root`) — the cluster-privileged KEDA operator fetches this URL every poll, so it is refused a metadata endpoint, an external host, or a sibling/system namespace. Residual surface (accepted trade-off): `tenant-root` is always allowed because the derived default points there, so a tenant can still aim the operator at any Service in `tenant-root` on any port/path (a blind in-cluster reachability probe — the operator reads no response body back to the tenant); the egress NetworkPolicy does not narrow that.",
           "type": "string",
           "default": ""
         },

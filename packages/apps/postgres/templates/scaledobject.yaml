@@ -106,9 +106,11 @@ CNPG collapse the cluster to 1 instance. Stop with an actionable message instead
 {{- if not (regexMatch $hostRe $saHost) }}
 {{- fail (printf "postgres: autoscaling.serverAddress host %q is not an in-cluster Service DNS name (must be <service>.<namespace>.svc or ...svc.%s). An external host or IP is refused so the cluster-privileged KEDA operator cannot be used as an SSRF relay to a metadata endpoint or another tenant's address." $saHost (default "<cluster-domain>" $clusterDomain)) }}
 {{- end }}
-{{- /* Namespace-pin: the <ns> label of the host must be one the tenant may read from.
-       API-OWNER GATE: this narrows what a tenant may set in autoscaling.serverAddress
-       (own subtree only) — a multi-tenancy semantics change; needs @lllamnyp/@kvaps sign-off. */ -}}
+{{- /* Namespace-pin: the <ns> label of the host must be one the tenant may read from
+       (own namespace, parents, or tenant-root). This narrows what a tenant may set in
+       autoscaling.serverAddress; the constraint and its residual surface (tenant-root is
+       always allowed, so a blind in-cluster probe to a root Service stays possible) are
+       documented on the serverAddress field in values.yaml. */ -}}
 {{- $svcNs := regexReplaceAll "^.*\\.([^.]+)\\.svc(\\..*)?$" $saHost "${1}" }}
 {{- $allowedNs := include "cozy-lib.rbac.allParentTenantsAndThis" .Release.Namespace | fromYamlArray }}
 {{- if not (has $svcNs $allowedNs) }}
