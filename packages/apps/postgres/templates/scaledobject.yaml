@@ -39,6 +39,19 @@ CNPG collapse the cluster to 1 instance. Stop with an actionable message instead
 {{- if gt (int .Values.replicas) (int .Values.autoscaling.maxReplicas) }}
 {{- fail (printf "postgres: replicas (%d) exceeds autoscaling.maxReplicas (%d); enabling autoscaling (or dry-run/transition) would make KEDA's HPA cut the live count straight to maxReplicas in one step, shedding the surplus standbys and their PVCs past the scale-down pacing. Raise autoscaling.maxReplicas to at least replicas, or lower replicas deliberately first." (int .Values.replicas) (int .Values.autoscaling.maxReplicas)) }}
 {{- end }}
+{{- /* Symmetric LOW-side of the replicas>maxReplicas guard above. Under dry-run/transition
+       the chart renders the STATIC instances=replicas, but the ScaledObject still carries
+       minReplicaCount=effectiveMin with both scale directions paused. The pause disables the
+       HPA's scaling POLICIES, not its min-replica clamp — so when replicas<effectiveMin the
+       HPA raises the live count to the floor on its first reconcile, actuating a scale-up in
+       a mode documented as "actuates neither way", and because the rendered instances value
+       does not change the client-side two-way patch never pulls it back (permanent extra
+       standbys + PVCs). Active mode seeds max(replicas,effectiveMin) so it is unaffected;
+       disabled renders no ScaledObject, so no HPA min-clamp exists. Fail closed and tell the
+       operator to stage replicas to the floor first. */ -}}
+{{- if and (eq (include "postgres.autoscaling.paused" .) "true") (lt (int .Values.replicas) $emin) }}
+{{- fail (printf "postgres: replicas (%d) is below the effective floor (%d = max(minReplicas %d, maxSyncReplicas+1 %d, 2)); under dry-run/transition the ScaledObject is paused but its minReplicaCount clamp still raises the live count to the floor on the first reconcile (a scale-up in a mode meant to only observe), and client-side apply never pulls it back. Stage replicas to at least the floor before dry-run/transition." (int .Values.replicas) $emin (int .Values.autoscaling.minReplicas) (add (int .Values.quorum.maxSyncReplicas) 1)) }}
+{{- end }}
 {{- /* Absolute ceiling on the tenant-facing maxReplicas. The schema/CRD carry no
        `maximum` (cozyvalues-gen emits no numeric bound) and the aggregated apiserver does
        not range-validate the Application CR, so this render guard is the only bound; the
