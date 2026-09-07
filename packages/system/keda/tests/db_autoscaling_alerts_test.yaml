@@ -29,15 +29,39 @@ tests:
           content:
             alert: DatabaseAutoscalerScaleBlocked
           any: true
-      # ScaleBlocked (rules[1]) compares desired to the CNPG pod count and must NOT depend
-      # on a Pending phase (that is ScaleStuck's job) — otherwise it would miss the very
-      # case it exists for.
-      - matchRegex:
-          path: spec.groups[0].rules[1].expr
-          pattern: count by \(namespace\) \(kube_pod_labels\{.*label_cnpg_io_cluster
+      # ScaleBlocked (rules[1]) compares desired to the CNPG instance-pod count and must NOT
+      # depend on a Pending phase (that is ScaleStuck's job) — otherwise it would miss the
+      # very case it exists for.
       - notMatchRegex:
           path: spec.groups[0].rules[1].expr
           pattern: phase="Pending"
+      # count is per-cluster (namespace,cluster), not namespace-wide, so a sibling CNPG
+      # cluster's pods in the same namespace cannot mask one cluster's block
+      - matchRegex:
+          path: spec.groups[0].rules[1].expr
+          pattern: count by \(namespace,cluster\)
+      # ...and counts only INSTANCE pods (instance_role) so a transient basebackup/join Job
+      # pod does not inflate the count and hide a real block
+      - matchRegex:
+          path: spec.groups[0].rules[1].expr
+          pattern: label_cnpg_io_instance_role=~
+      # ...and is suppressed while a join Job is provisioning a replica (unless clause), so a
+      # healthy multi-step scale-up (serial basebackups, count lagging desired) does not fire
+      - matchRegex:
+          path: spec.groups[0].rules[1].expr
+          pattern: unless on\(namespace,cluster\)
+      # ScaleBlocked must not advise lowering maxReplicas (would abort a legitimate scale-up)
+      - notMatchRegex:
+          path: spec.groups[0].rules[1].annotations.description
+          pattern: lower autoscaling\.maxReplicas
+      # both scale-progress rules derive a common `cluster` label from the keda-hpa-<cluster>
+      # HPA name so the pod-side joins are per-cluster, not namespace-wide
+      - matchRegex:
+          path: spec.groups[0].rules[0].expr
+          pattern: (?s)label_replace\(.*horizontalpodautoscaler=~"keda-hpa-
+      - matchRegex:
+          path: spec.groups[0].rules[1].expr
+          pattern: keda-hpa-\(\.\+\)
       # at the ceiling: desired >= maxReplicas (NOT the ScalingLimited condition, which is
       # also true at the floor for an idle cluster and would make this fire on quiet DBs)
       - contains:

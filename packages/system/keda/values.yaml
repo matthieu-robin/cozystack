@@ -44,6 +44,17 @@ keda:
   # cannot be turned into an SSRF relay to a metadata endpoint or an external address. The
   # kube-apiserver entity covers the control plane however it is addressed, so unlike a raw
   # CIDR egress policy this does not risk starving the operator's apiserver access.
+  # SCOPE, two caveats (why the render-time namespace-pin in scaledobject.yaml is the primary
+  # control, not this policy):
+  #   1. `cluster` permits ALL in-cluster egress, any namespace — it does NOT stop the
+  #      operator being pointed at another tenant's or a system namespace's `.svc`. Blocking
+  #      that is the postgres chart's serverAddress namespace-pin, not this netpol.
+  #   2. off-cluster denial assumes the CNI actually enforces CiliumNetworkPolicy (flavor is
+  #      hardcoded cilium) AND that Cilium classifies the target as `world`. Link-local
+  #      (169.254.0.0/16, e.g. the 169.254.169.254 cloud-metadata IMDS) classification is
+  #      config-dependent and not guaranteed to be `world`; a non-Cilium / unenforced install
+  #      has no egress backstop at all. Re-verify off-cluster + IMDS denial live on
+  #      cozystack-pr-test (design proposal §Testing) before treating this as a hard control.
   networkPolicy:
     enabled: true
     flavor: cilium
