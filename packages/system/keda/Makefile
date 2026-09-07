@@ -23,3 +23,6 @@ update:
 	# Cozystack ships its own unittest coverage at tests/; drop the vendored
 	# upstream fixtures so they are not mistaken for reviewed code here.
 	rm -rf charts/keda/tests
+	# Gate the CiliumNetworkPolicy objects on the cilium.io/v2 API being served, so the
+	# package installs on variants that ship no Cilium (see the patch header).
+	patch --no-backup-if-mismatch -p1 < patches/ciliumnetworkpolicy-capability-gate.patch

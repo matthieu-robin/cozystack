@@ -52,8 +52,11 @@ keda:
   #   2. off-cluster denial assumes the CNI actually enforces CiliumNetworkPolicy (flavor is
   #      hardcoded cilium) AND that Cilium classifies the target as `world`. Link-local
   #      (169.254.0.0/16, e.g. the 169.254.169.254 cloud-metadata IMDS) classification is
-  #      config-dependent and not guaranteed to be `world`; a non-Cilium / unenforced install
-  #      has no egress backstop at all. Re-verify off-cluster + IMDS denial live on
+  #      config-dependent and not guaranteed to be `world`. The CiliumNetworkPolicy objects
+  #      are gated on the cilium.io/v2 API being served (patches/ciliumnetworkpolicy-
+  #      capability-gate.patch) so the package still INSTALLS on a variant that ships no
+  #      Cilium — but there the egress backstop is simply ABSENT, so the chart's serverAddress
+  #      namespace-pin is the only control. Re-verify off-cluster + IMDS denial live on
   #      cozystack-pr-test (design proposal §Testing) before treating this as a hard control.
   networkPolicy:
     enabled: true

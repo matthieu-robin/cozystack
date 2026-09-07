@@ -99,6 +99,9 @@ tests:
   # is restricted to the apiserver + in-cluster endpoints, with `world` (off-cluster)
   # denied, so it cannot be turned into an SSRF relay to a metadata/external address.
   - it: restricts the operator egress to apiserver + in-cluster (no world) via CiliumNetworkPolicy
+    capabilities:
+      apiVersions:
+        - cilium.io/v2
     templates:
       - charts/keda/templates/manager/ciliumnetworkpolicy.yaml
     asserts:
@@ -115,3 +118,27 @@ tests:
       - notContains:
           path: spec.egress[0].toEntities
           content: world
+
+  # The egress hardening ships as CiliumNetworkPolicy (cilium.io/v2). The cozystack shim
+  # hardcodes flavor: cilium, so on a variant that serves no cilium.io/v2 CRD (an ISP-hosted
+  # cluster whose CNI is not Cilium) the object is unmappable and the whole keda HelmRelease
+  # fails to install. Gate the emission on the API being served so the package installs on
+  # any CNI; the egress hardening is simply absent where Cilium is not.
+  - it: does not emit the manager CiliumNetworkPolicy where cilium.io/v2 is not served
+    templates:
+      - charts/keda/templates/manager/ciliumnetworkpolicy.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: emits the manager CiliumNetworkPolicy where cilium.io/v2 is served
+    capabilities:
+      apiVersions:
+        - cilium.io/v2
+    templates:
+      - charts/keda/templates/manager/ciliumnetworkpolicy.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: CiliumNetworkPolicy
