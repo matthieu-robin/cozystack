@@ -71,6 +71,24 @@ const HelmInstallDisableWaitAnnotation = "release.cozystack.io/helm-install-disa
 // Required by the postgres read-replica autoscaler, whose seeded spec.instances
 // must not be reverted from KEDA's live /scale value. Accepts "true"/"enabled" or
 // "false"/"disabled" (case-insensitive); empty leaves the helm-controller default.
+//
+// The switch is deliberately kind-wide, not per-instance: it applies to EVERY
+// HelmRelease the kind emits, including the ones that never enable the co-writing
+// feature. That is a considered trade-off, not an oversight:
+//   - Lifecycle stability. helm-controller resolves an unset Upgrade.ServerSideApply
+//     through "auto" from the last release's apply method, so gating client-side on
+//     "autoscaling active" would force an SSA->client-side ownership handoff on the
+//     live spec.instances the moment a tenant enables autoscaling - the exact live
+//     field handoff this design was chosen to avoid. Keeping the method stable for
+//     the kind's whole lifecycle makes enable/dry-run/transition/disable clean
+//     two-way merges with no apply-method transition.
+//   - Cost, acknowledged. A release that never autoscales is client-side too, so
+//     helm-controller no longer re-asserts a chart-rendered field that has drifted
+//     on the live CR (client-side diffs previous-vs-new render only, never live
+//     state) and driftDetection is not configured. The platform relies on GitOps
+//     re-render for correctness rather than SSA drift-correction; a per-instance
+//     apply strategy is a follow-up if drift-correction on non-feature releases of
+//     the kind is ever required.
 const HelmServerSideApplyAnnotation = "release.cozystack.io/helm-server-side-apply"
 
 // helmTimeoutPattern mirrors the CRD validation pattern used by Flux

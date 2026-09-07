@@ -9,6 +9,15 @@ metadata:
     # every reconcile, collapsing an autoscaled cluster. Client-side apply diffs the
     # previous vs new rendered manifest and does not consult live state, so the chart's
     # constant instances seed is a no-op and KEDA's value survives.
+    # Kind-wide is deliberate (every Postgres release, not only autoscaled ones): a
+    # per-instance flip would force an SSA->client-side handoff on the live
+    # spec.instances the moment autoscaling is enabled (helm-controller resolves an
+    # unset serverSideApply from the last release's method), the live field handoff
+    # this design avoids. Trade-off: a never-autoscaled release is client-side too, so
+    # a chart field that drifts on the live CR is no longer re-asserted (client-side
+    # never reads live state; driftDetection is unset) - accepted, the platform relies
+    # on GitOps re-render, and per-instance apply strategy is a follow-up. See
+    # HelmServerSideApplyAnnotation in pkg/config/config.go.
     release.cozystack.io/helm-server-side-apply: "false"
 spec:
   application:
