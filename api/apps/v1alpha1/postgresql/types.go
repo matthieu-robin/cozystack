@@ -18,7 +18,7 @@ type Config struct {
 }
 
 type ConfigSpec struct {
-	// Number of Postgres replicas. Under active autoscaling this is the resting/seed count (and the count restored on disable), not the live count — KEDA drives the live count. Lowering it below the live count, or disabling/dry-running while it sits below the live count, sheds the surplus replicas + PVCs; stage it to the live count first (suspend the HelmRelease and `kubectl scale` if needed). Must stay greater than `quorum.maxSyncReplicas`.
+	// Number of Postgres replicas. Under active autoscaling this is the resting/seed count, not the live count — KEDA drives the live count via `/scale`. Disabling autoscaling does NOT automatically bring the live count back to `replicas`: the client-side merge writes `instances` only when the rendered value changes, so a cluster KEDA grew past `replicas` stays there with no autoscaler left to reduce it — lower `replicas` to the count you want and it rebases down (shedding the surplus replicas + PVCs). Lowering it below the live count, or disabling/dry-running while it sits below the live count, sheds in one step past the scaleDown pacing; stage it to the live count first (suspend the HelmRelease and `kubectl scale` if needed) to avoid a transient. Must stay greater than `quorum.maxSyncReplicas`.
 	// +kubebuilder:default:=2
 	Replicas int `json:"replicas"`
 	// Explicit CPU and memory configuration for each PostgreSQL replica. When omitted, the preset defined in `resourcesPreset` is applied.
