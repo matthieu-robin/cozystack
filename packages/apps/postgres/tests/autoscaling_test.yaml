@@ -231,7 +231,7 @@ tests:
       # not be able to point it at a cloud metadata endpoint or an external host. Only an
       # in-cluster Service DNS name (…svc[.<domain>]) is accepted.
       - failedTemplate:
-          errorMessage: 'postgres: autoscaling.serverAddress host "169.254.169.254" is not an in-cluster Service DNS name (must end in .svc, e.g. vmselect-shortterm.<namespace>.svc). An external host or IP is refused so the cluster-privileged KEDA operator cannot be used as an SSRF relay to a metadata endpoint or another tenant''s address.'
+          errorMessage: 'postgres: autoscaling.serverAddress host "169.254.169.254" is not an in-cluster Service DNS name (must be <service>.<namespace>.svc or ...svc.cozy.local). An external host or IP is refused so the cluster-privileged KEDA operator cannot be used as an SSRF relay to a metadata endpoint or another tenant''s address.'
 
   - it: refuses an external-hostname serverAddress
     templates:
@@ -245,7 +245,24 @@ tests:
         target: 150
     asserts:
       - failedTemplate:
-          errorMessage: 'postgres: autoscaling.serverAddress host "evil.example.com" is not an in-cluster Service DNS name (must end in .svc, e.g. vmselect-shortterm.<namespace>.svc). An external host or IP is refused so the cluster-privileged KEDA operator cannot be used as an SSRF relay to a metadata endpoint or another tenant''s address.'
+          errorMessage: 'postgres: autoscaling.serverAddress host "evil.example.com" is not an in-cluster Service DNS name (must be <service>.<namespace>.svc or ...svc.cozy.local). An external host or IP is refused so the cluster-privileged KEDA operator cannot be used as an SSRF relay to a metadata endpoint or another tenant''s address.'
+
+  - it: refuses a crafted .svc host whose suffix is an external domain (SSRF bypass)
+    templates:
+      - templates/scaledobject.yaml
+    set:
+      autoscaling:
+        enabled: true
+        # `.svc` label followed by an attacker-controlled domain: rejected because the
+        # suffix is anchored to the cluster domain, not any dotted tail. Without the anchor
+        # this resolves and egresses off-cluster.
+        serverAddress: http://x.svc.attacker.com/api/v1/query
+        minReplicas: 2
+        maxReplicas: 6
+        target: 150
+    asserts:
+      - failedTemplate:
+          errorMessage: 'postgres: autoscaling.serverAddress host "x.svc.attacker.com" is not an in-cluster Service DNS name (must be <service>.<namespace>.svc or ...svc.cozy.local). An external host or IP is refused so the cluster-privileged KEDA operator cannot be used as an SSRF relay to a metadata endpoint or another tenant''s address.'
 
   - it: accepts an in-cluster serverAddress that carries the cluster domain (…svc.<domain>)
     templates:

@@ -54,12 +54,22 @@ CNPG collapse the cluster to 1 instance. Stop with an actionable message instead
        is namespace-scoped by construction; this restricts the DESTINATION to an
        in-cluster Service DNS name (…svc[.<clusterdomain>]) — the only shape a legitimate
        vmselect takes — and refuses anything else. Defense-in-depth: the keda package also
-       enables an egress NetworkPolicy that denies the operator any off-cluster egress. */ -}}
+       enables an egress NetworkPolicy that denies the operator any off-cluster egress.
+       The optional suffix is anchored to THIS cluster's domain, not an arbitrary dotted
+       tail: an unanchored `(\.[a-zA-Z0-9.-]+)?` still accepts x.svc.attacker.com (a `.svc`
+       label followed by any external domain), so the guard would pass an off-cluster host.
+       cluster-domain rides _cluster (platform apps.yaml, from networking.clusterDomain). */ -}}
 {{- $serverAddress := include "postgres.autoscaling.serverAddress" . }}
 {{- $saNoScheme := regexReplaceAll "^[a-zA-Z][a-zA-Z0-9+.-]*://" $serverAddress "" }}
 {{- $saHost := regexReplaceAll "[:/].*$" $saNoScheme "" }}
-{{- if not (regexMatch "^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?\\.svc(\\.[a-zA-Z0-9.-]+)?$" $saHost) }}
-{{- fail (printf "postgres: autoscaling.serverAddress host %q is not an in-cluster Service DNS name (must end in .svc, e.g. vmselect-shortterm.<namespace>.svc). An external host or IP is refused so the cluster-privileged KEDA operator cannot be used as an SSRF relay to a metadata endpoint or another tenant's address." $saHost) }}
+{{- $clusterDomain := index (.Values._cluster | default dict) "cluster-domain" }}
+{{- $domainSuffix := "" }}
+{{- if $clusterDomain }}
+{{- $domainSuffix = printf "(\\.%s)?" ($clusterDomain | replace "." "\\.") }}
+{{- end }}
+{{- $hostRe := printf "^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?\\.svc%s$" $domainSuffix }}
+{{- if not (regexMatch $hostRe $saHost) }}
+{{- fail (printf "postgres: autoscaling.serverAddress host %q is not an in-cluster Service DNS name (must be <service>.<namespace>.svc or ...svc.%s). An external host or IP is refused so the cluster-privileged KEDA operator cannot be used as an SSRF relay to a metadata endpoint or another tenant's address." $saHost (default "<cluster-domain>" $clusterDomain)) }}
 {{- end }}
 {{- include "cozy-lib.keda.scaledObject" (dict
      "name" .Release.Name
