@@ -16,7 +16,15 @@ spec:
     serviceName: {{ .Release.Name }}
     version: {{ include "opensearch.versionMap" $ }}
     httpPort: 9200
-    setVMMaxMapCount: true
+    {{- /*
+    The operator's own way to raise vm.max_map_count is a privileged init
+    container in every OpenSearch pod, and the PodSecurity level tenant
+    namespaces run at refuses that before any pod exists. The sysctl comes from
+    the DaemonSet in the opensearch-operator package instead, which raises it on
+    every node from a namespace the platform labels privileged. The node
+    contract is where the value belongs in the long run.
+    */}}
+    setVMMaxMapCount: false
     drainDataNodes: true
     {{- if gt (len .Values.images.opensearch) 0 }}
     image: {{ .Values.images.opensearch }}
