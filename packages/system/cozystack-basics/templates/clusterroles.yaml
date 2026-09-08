@@ -136,6 +136,24 @@ rules:
   resources:
   - options
   verbs: ["get", "list", "watch"]
+# Read-only visibility into the objects that govern read-replica autoscaling of a
+# tenant's own databases: the KEDA ScaledObject the chart renders into the tenant
+# namespace and the keda-hpa-<release> HorizontalPodAutoscaler KEDA creates beside
+# it. Without this a tenant who enables autoscaling.enabled but mis-set serverAddress
+# (its own Monitoring stack has no kube_pod_labels) has no in-band way to see the
+# FailedGetExternalMetric / TriggerError that keeps autoscaling from actuating - the
+# error would otherwise surface only in a root-scoped alert they cannot reach. Read
+# verbs only: the objects are managed by the chart / KEDA, not edited by the tenant.
+- apiGroups:
+  - keda.sh
+  resources:
+  - scaledobjects
+  verbs: ["get", "list", "watch"]
+- apiGroups:
+  - autoscaling
+  resources:
+  - horizontalpodautoscalers
+  verbs: ["get", "list", "watch"]
 ---
 # == use cluster role ==
 # Aggregates view + all roles labeled for use access
