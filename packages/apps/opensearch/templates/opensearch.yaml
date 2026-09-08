@@ -25,7 +25,22 @@ spec:
     contract is where the value belongs in the long run.
     */}}
     setVMMaxMapCount: false
-    drainDataNodes: true
+    {{- /*
+    Draining needs a data node with room for the shards, and below three there is
+    none. With one the operator excludes the node, finds its shards still there
+    and never deletes the pod. With two it stops trying for a full drain itself:
+    opensearch-k8s-operator v2.8.0 warns "some shards may not drain" in
+    pkg/reconcilers/rollingRestart.go restartStatefulSetPod, and
+    PreparePodForDelete in opensearch-gateway/services/os_data_service.go then
+    waits for system index primaries alone, which the surviving node cannot take
+    while it holds their replicas. Not draining pauses replica allocation for the
+    restart instead and re-enables it afterwards.
+
+    Gated on the data role as well: the operator's DataNodesCount adds up the live
+    StatefulSets of pools carrying that role, so with the role off it finds no data
+    nodes to drain whatever the replica count.
+    */}}
+    drainDataNodes: {{ and .Values.nodeRoles.data (gt (int .Values.replicas) 2) }}
     {{- if gt (len .Values.images.opensearch) 0 }}
     image: {{ .Values.images.opensearch }}
     {{- end }}
