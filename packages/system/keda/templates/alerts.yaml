@@ -70,9 +70,9 @@ spec:
         )
         and on(namespace,cluster) (
           max by (namespace,cluster) (
-            kube_pod_status_phase{phase="Pending"}
+            kube_pod_status_phase{job="kube-state-metrics",phase="Pending"}
             * on(namespace,pod) group_left(cluster)
-            label_replace(kube_pod_labels{label_cnpg_io_cluster!=""}, "cluster", "$1", "label_cnpg_io_cluster", "(.+)")
+            label_replace(kube_pod_labels{job="kube-state-metrics",label_cnpg_io_cluster!=""}, "cluster", "$1", "label_cnpg_io_cluster", "(.+)")
           ) > 0
         )
       for: 15m
