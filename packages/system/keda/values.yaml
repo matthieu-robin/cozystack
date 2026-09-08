@@ -68,13 +68,21 @@ keda:
   networkPolicy:
     enabled: true
     flavor: cilium
-  # NOTE (image digests): the three KEDA images render tag-only
-  # (kedacore/keda{,-metrics-apiserver,-admission-webhooks}:<appVersion>) — the vendored
-  # chart's image helper is `repository:tag` with no digest field, so a @sha256 pin cannot
-  # be set from these shim values without patching the subchart. Version is pinned via the
-  # chart appVersion (2.20.2) + the make-update lockstep assert; a digest pin is a
-  # follow-up that needs an upstream chart change (Renovate's helm-values manager is off
-  # repo-wide, so this is a supply-chain pin, not an automation gap).
+  # Digest-pin the three KEDA images (supply-chain: match every other cozystack
+  # system image, which pins by @sha256). The vendored chart renders each image as
+  # `{{ registry }}/{{ repository }}:{{ tag | default appVersion }}`, and
+  # `2.20.2@sha256:<digest>` is a valid OCI reference where the digest wins at
+  # resolution — so the pin goes in the tag field of these shim values with no
+  # subchart patch. Digests are the multi-arch image-index digests for the 2.20.2
+  # tag on ghcr.io (amd64/arm64/s390x); bump them in lockstep with
+  # KEDA_CHART_VERSION in the Makefile whenever the chart is re-vendored.
+  image:
+    keda:
+      tag: "2.20.2@sha256:fe74c7b8849586a67ad2201bcb89e7f5ac221ff90399ecaa8fd28427f1ef11e6"
+    metricsApiServer:
+      tag: "2.20.2@sha256:27286536a8a775aeeee37a7e343f8ecebb27ebf680ee1181a4f99e82eefb253b"
+    webhooks:
+      tag: "2.20.2@sha256:41f74102aba7959c6e8d08b433ab8a5fd6cae7c5646c78f7fe3de40a52df3439"
   # Cozystack's cluster domain, not the upstream chart default "cluster.local".
   # KEDA's metrics-apiserver dials the operator's metrics gRPC service at
   # keda-operator.<ns>.svc.<clusterDomain>:9666 and the operator mints that

@@ -20,6 +20,19 @@ tests:
           path: spec.group
           value: external.metrics.k8s.io
 
+  # Supply-chain: the shim digest-pins all three KEDA images by @sha256 (matching
+  # every other cozystack system image) via `tag: "<appVersion>@sha256:..."`, which
+  # the vendored `repository:tag` helper renders verbatim. Guard the operator image
+  # keeps a digest so a re-vendor that drops the shim override goes red rather than
+  # silently shipping a floating tag.
+  - it: digest-pins the operator image
+    templates:
+      - charts/keda/templates/manager/deployment.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "^ghcr.io/kedacore/keda:2.20.2@sha256:[0-9a-f]{64}$"
+
   # The shim turns ServiceMonitors on; guard the override survives a re-vendor.
   - it: emits the metrics-server ServiceMonitor enabled by the cozystack shim
     templates:
