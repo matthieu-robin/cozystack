@@ -102,7 +102,14 @@ CNPG collapse the cluster to 1 instance. Stop with an actionable message instead
 {{- if $clusterDomain }}
 {{- $domainSuffix = printf "(\\.%s)?" ($clusterDomain | replace "." "\\.") }}
 {{- end }}
-{{- $hostRe := printf "^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?\\.svc%s$" $domainSuffix }}
+{{- /* Require the full <service>.<namespace>.svc shape: two DNS labels (no embedded
+       dots) before .svc, so a single-label host like `foo.svc` is rejected HERE with the
+       host message rather than slipping through to the namespace-pin below, where the
+       ns-extraction regex leaves it unchanged and it fails for the wrong reason. Anchoring
+       the two labels also drops the old class's stray `.`, which let a dotted tail masquerade
+       as one label. */ -}}
+{{- $dnsLabel := "[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?" }}
+{{- $hostRe := printf "^%s\\.%s\\.svc%s$" $dnsLabel $dnsLabel $domainSuffix }}
 {{- if not (regexMatch $hostRe $saHost) }}
 {{- fail (printf "postgres: autoscaling.serverAddress host %q is not an in-cluster Service DNS name (must be <service>.<namespace>.svc or ...svc.%s). An external host or IP is refused so the cluster-privileged KEDA operator cannot be used as an SSRF relay to a metadata endpoint or another tenant's address." $saHost (default "<cluster-domain>" $clusterDomain)) }}
 {{- end }}

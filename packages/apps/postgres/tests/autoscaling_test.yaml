@@ -265,6 +265,28 @@ tests:
       - failedTemplate:
           errorMessage: 'postgres: autoscaling.serverAddress host "x.svc.attacker.com" is not an in-cluster Service DNS name (must be <service>.<namespace>.svc or ...svc.cozy.local). An external host or IP is refused so the cluster-privileged KEDA operator cannot be used as an SSRF relay to a metadata endpoint or another tenant''s address.'
 
+  - it: refuses a single-label .svc host with the host message, not the namespace one
+    templates:
+      - templates/scaledobject.yaml
+    set:
+      autoscaling:
+        enabled: true
+        # `foo.svc` carries no <namespace> segment, so it is not a resolvable in-cluster
+        # Service DNS name. It must be rejected at the host-shape check with the "not an
+        # in-cluster Service DNS name" message. Before the host regex required a
+        # <service>.<namespace>.svc shape it slipped past that check (the regex accepted any
+        # dotted tail ending in .svc), and the namespace-extraction regex two lines down
+        # left the host unchanged, so it was rejected for the WRONG reason — a "namespace
+        # outside subtree" error naming the whole host as the namespace. Same rejection,
+        # actionable message.
+        serverAddress: http://foo.svc:8481/select/0/prometheus
+        minReplicas: 2
+        maxReplicas: 6
+        target: 150
+    asserts:
+      - failedTemplate:
+          errorMessage: 'postgres: autoscaling.serverAddress host "foo.svc" is not an in-cluster Service DNS name (must be <service>.<namespace>.svc or ...svc.cozy.local). An external host or IP is refused so the cluster-privileged KEDA operator cannot be used as an SSRF relay to a metadata endpoint or another tenant''s address.'
+
   - it: accepts an in-cluster serverAddress that carries the cluster domain (…svc.<domain>)
     templates:
       - templates/scaledobject.yaml
