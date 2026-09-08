@@ -21,3 +21,23 @@ tests:
       - equal:
           path: metadata.annotations["release.cozystack.io/helm-server-side-apply"]
           value: "false"
+  # A ScaledObject whose Prometheus trigger cannot resolve stays Ready=False
+  # (TriggerError) forever; helm-controller's default wait would then block the
+  # WHOLE Postgres HelmRelease on it, wedging an otherwise-healthy database. The
+  # cozyrd carries a healthCheckExpr that treats the ScaledObject as always-ready
+  # for release readiness (autoscaling health is surfaced by alerts, not by the
+  # release gate). Dropping it re-opens the wedge, so this goes red.
+  - it: neutralises ScaledObject readiness so it cannot wedge the release
+    documentSelector:
+      path: metadata.name
+      value: postgres
+    asserts:
+      - equal:
+          path: spec.release.healthCheckExprs[0].apiVersion
+          value: keda.sh/v1alpha1
+      - equal:
+          path: spec.release.healthCheckExprs[0].kind
+          value: ScaledObject
+      - equal:
+          path: spec.release.healthCheckExprs[0].current
+          value: "true"
