@@ -43,11 +43,17 @@ spec:
         {{- if .Values.backupStorage.endpointCASecretName }}
         # Verify the S3 endpoint against this private CA when the admin points
         # endpointCASecretName at a Secret carrying ca.crt (self-signed SeaweedFS).
-        # The Secret is required, not optional: a missing one must fail the Pod
-        # loudly rather than silently fall through to skip-verify.
+        # Optional, because nothing projects this Secret into the app namespace:
+        # a required mount would wedge the Pod on FailedMount for the whole
+        # activeDeadlineSeconds (never a Failed Job) when the admin has not yet
+        # created it — the very state the env refs below are optional to avoid.
+        # A missing ca.crt does NOT skip verification: the script falls through
+        # to the image's system CA store and curl fails the handshake in seconds
+        # with a legible error; skip-verify still needs its explicit opt-in.
         - name: s3-ca
           secret:
             secretName: {{ .Values.backupStorage.endpointCASecretName | quote }}
+            optional: true
         {{- end }}
       containers:
         - name: redis-backup
@@ -130,54 +136,14 @@ spec:
               : "${AWS_SECRET_ACCESS_KEY:?missing AWS_SECRET_ACCESS_KEY in cozy-backups-creds}"
 
               MODE="{{ printf "{{ .Mode }}" }}"
-              # The sentinel Service always belongs to the app we operate on:
-              # the source on backup, the restore TARGET on restore (both are
-              # .Release.Name at driver-render time). The cozystack redis chart
-              # names its RedisFailover redis-<app>, so the operator's sentinel
-              # Service is rfs-redis-<app>; mymaster is its master name.
-              SENTINEL="rfs-redis-{{ printf "{{ .Release.Name }}" }}"
               # The object name is minted by the controller per BackupJob and
               # recorded on the Backup, so each backup is a distinct object and a
               # restore reads back the exact one its Backup points at. Computing
-              # it in-script would collapse a Plan's history onto one object.
+              # it in-script would collapse a Plan's history onto one object. On
+              # cleanup it names the object a deleted Backup must remove.
               KEY="{{ printf "{{ .ObjectKey }}" }}"
 
-              # Redis server-side TLS. The chart moves Redis and Sentinel to a
-              # TLS-only listener when the app has tls.enabled and publishes the
-              # trust anchor at redis-<app>.ca-cert; that Secret is mounted
-              # optionally, so ca.crt exists here iff the app is TLS. Verify both
-              # the Sentinel and the master connection against it. authClients:
-              # yes (mutual TLS) is out of scope — the platform issues no client
-              # certificate — but is off by default.
-              RTLS=""
-              if [ -f /etc/redis-ca/ca.crt ]; then
-                RTLS="--tls --cacert /etc/redis-ca/ca.crt"
-              fi
-
-              # Discover the current master via any sentinel — the RedisFailover
-              # master moves on failover, so a fixed host would break after one.
-              addr=$(redis-cli ${RTLS} -h "${SENTINEL}" -p 26379 sentinel get-master-addr-by-name mymaster)
-              MHOST=$(echo "${addr}" | sed -n '1p')
-              MPORT=$(echo "${addr}" | sed -n '2p')
-              if [ -z "${MHOST}" ] || [ -z "${MPORT}" ]; then
-                echo "could not resolve redis master from sentinel ${SENTINEL}" >&2
-                exit 1
-              fi
-
-              # tgt runs redis-cli against the app master. The password reaches
-              # redis-cli through REDISCLI_AUTH, never argv (ps-visible in the
-              # pod); it is set only when the app has auth, because an empty value
-              # makes redis-cli send AUTH to an unauthenticated server and fail.
-              # The throwaway loader below is local and unauthenticated, so it
-              # must NOT inherit this — hence a per-call wrapper, not an export.
-              tgt() {
-                if [ -n "${REDIS_PASSWORD:-}" ]; then
-                  REDISCLI_AUTH="${REDIS_PASSWORD}" redis-cli ${RTLS} -h "${MHOST}" -p "${MPORT}" "$@"
-                else
-                  redis-cli ${RTLS} -h "${MHOST}" -p "${MPORT}" "$@"
-                fi
-              }
-
+              # S3 transport, needed by every mode (backup, restore, cleanup).
               case "${S3_ENDPOINT}" in
                 http://*|https://*) BASE="${S3_ENDPOINT}" ;;
                 *)                  BASE="https://${S3_ENDPOINT}" ;;
@@ -203,6 +169,65 @@ spec:
               }
               OBJ="${BASE}/${S3_BUCKET}/${KEY}"
 
+              # Cleanup runs when a Backup is deleted: it removes just that
+              # Backup's object and never contacts Redis, so it works even after
+              # the source app is gone. Idempotent — a 404 (already gone) is
+              # success; -f is dropped so the 404 does not abort before the case.
+              if [ "${MODE}" = "cleanup" ]; then
+                echo "deleting s3://${S3_BUCKET}/${KEY}"
+                code=$(curl -sS -o /dev/null -w '%{http_code}' ${TLS} \
+                  --aws-sigv4 "aws:amz:${S3_REGION}:s3" \
+                  --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" \
+                  -X DELETE "${OBJ}")
+                case "${code}" in
+                  2??|404) echo "deleted (HTTP ${code})"; exit 0 ;;
+                  *)       echo "delete failed: HTTP ${code}" >&2; exit 1 ;;
+                esac
+              fi
+
+              # Redis server-side TLS. The chart moves Redis and Sentinel to a
+              # TLS-only listener when the app has tls.enabled and publishes the
+              # trust anchor at redis-<app>.ca-cert; that Secret is mounted
+              # optionally, so ca.crt exists here iff the app is TLS. Verify both
+              # the Sentinel and the master connection against it. authClients:
+              # yes (mutual TLS) is out of scope — the platform issues no client
+              # certificate — but is off by default.
+              RTLS=""
+              if [ -f /etc/redis-ca/ca.crt ]; then
+                RTLS="--tls --cacert /etc/redis-ca/ca.crt"
+              fi
+
+              # The sentinel Service always belongs to the app we operate on:
+              # the source on backup, the restore TARGET on restore (both are
+              # .Release.Name at driver-render time). The cozystack redis chart
+              # names its RedisFailover redis-<app>, so the operator's sentinel
+              # Service is rfs-redis-<app>; mymaster is its master name.
+              SENTINEL="rfs-redis-{{ printf "{{ .Release.Name }}" }}"
+
+              # Discover the current master via any sentinel — the RedisFailover
+              # master moves on failover, so a fixed host would break after one.
+              addr=$(redis-cli ${RTLS} -h "${SENTINEL}" -p 26379 sentinel get-master-addr-by-name mymaster)
+              MHOST=$(echo "${addr}" | sed -n '1p')
+              MPORT=$(echo "${addr}" | sed -n '2p')
+              if [ -z "${MHOST}" ] || [ -z "${MPORT}" ]; then
+                echo "could not resolve redis master from sentinel ${SENTINEL}" >&2
+                exit 1
+              fi
+
+              # tgt runs redis-cli against the app master. The password reaches
+              # redis-cli through REDISCLI_AUTH, never argv (ps-visible in the
+              # pod); it is set only when the app has auth, because an empty value
+              # makes redis-cli send AUTH to an unauthenticated server and fail.
+              # The throwaway loader below is local and unauthenticated, so it
+              # must NOT inherit this — hence a per-call wrapper, not an export.
+              tgt() {
+                if [ -n "${REDIS_PASSWORD:-}" ]; then
+                  REDISCLI_AUTH="${REDIS_PASSWORD}" redis-cli ${RTLS} -h "${MHOST}" -p "${MPORT}" "$@"
+                else
+                  redis-cli ${RTLS} -h "${MHOST}" -p "${MPORT}" "$@"
+                fi
+              }
+
               if [ "${MODE}" = "backup" ]; then
                 echo "dumping RDB from master ${MHOST}:${MPORT}"
                 tgt --rdb /tmp/dump.rdb
@@ -226,7 +251,13 @@ spec:
                   sleep 1
                 done
                 if ! redis-cli -p 6399 PING >/dev/null 2>&1; then
-                  echo "throwaway redis failed to load the RDB (version too new for the image?)" >&2
+                  # The loader is memory-bounded by the Pod's limit; the most
+                  # common cause here is a dataset larger than that limit (the
+                  # cgroup OOM-kills redis-server while sh survives), then an RDB
+                  # version newer than the image. Raise
+                  # backupStrategyController.redisBackupResources.limits.memory /
+                  # ephemeral-storage, or check the image version.
+                  echo "throwaway redis did not become ready: dataset likely exceeds the restore memory limit, or the RDB version is newer than the image" >&2
                   exit 1
                 fi
                 # A RESP base AOF (no RDB preamble) is the faithful, replayable
@@ -238,7 +269,10 @@ spec:
                   [ "$(redis-cli -p 6399 INFO persistence | tr -d '\r' | awk -F: '/aof_rewrite_in_progress:/{print $2}')" = "0" ] && break
                   sleep 1
                 done
-                REPLAY=$(ls /tmp/restore/appendonlydir/*.base.aof 2>/dev/null | head -1)
+                # find (not `ls`) so no-match returns 0: under pipefail a failed
+                # ls would abort the script before the -z guard, so the "no base
+                # AOF" diagnostic below would never print.
+                REPLAY=$(find /tmp/restore/appendonlydir -name '*.base.aof' 2>/dev/null | head -n1 || true)
                 if [ -z "${REPLAY}" ]; then
                   echo "throwaway redis produced no base AOF to replay" >&2
                   exit 1
@@ -253,18 +287,14 @@ spec:
               fi
           # On restore the throwaway loader holds the whole dataset in memory and
           # materialises the RDB plus its AOF rewrite on disk, so memory and
-          # ephemeral-storage must scale with the Redis it restores. These
-          # defaults suit small-to-medium instances; a tenant with a large Redis
-          # raises them on the shipped strategy CR.
+          # ephemeral-storage must scale with the Redis it restores — the restore
+          # ceiling, not the backup one, sets these. The shipped Strategy CR is
+          # cluster-scoped and Helm-managed, so an admin raises the ceiling once
+          # via backupStrategyController.redisBackupResources in chart values
+          # (an in-place edit of the CR reverts on the next chart upgrade). The
+          # defaults suit small-to-medium instances.
           resources:
-            requests:
-              cpu: 10m
-              memory: 64Mi
-              ephemeral-storage: 256Mi
-            limits:
-              cpu: "1"
-              memory: 1Gi
-              ephemeral-storage: 4Gi
+            {{- toYaml .Values.backupStrategyController.redisBackupResources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

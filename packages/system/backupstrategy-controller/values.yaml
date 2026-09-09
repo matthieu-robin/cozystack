@@ -58,7 +58,23 @@ backupStrategyController:
   # redisBackupActiveDeadlineSeconds bounds one backup/restore Job so a run that
   # wedges (e.g. a --rdb dump blocking on a stalled master) becomes a Failed Job
   # the driver reports, rather than a Running BackupJob a cron Plan stacks behind.
+  # The driver promotes this to the Job's activeDeadlineSeconds, so it bounds the
+  # whole run across retries, not each Pod attempt separately.
   redisBackupActiveDeadlineSeconds: 3600
+  # redisBackupResources sizes the Redis strategy Pod. Restore is the demanding
+  # side: the throwaway loader holds the whole dataset in memory and writes the
+  # RDB plus its AOF rewrite to ephemeral storage, so a large Redis needs memory
+  # and ephemeral-storage well above the backup's. Raise these for tenants with
+  # large instances; the defaults suit small-to-medium ones.
+  redisBackupResources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+      ephemeral-storage: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+      ephemeral-storage: 4Gi
   replicas: 2
   debug: false
   metrics:

@@ -37,6 +37,15 @@ const (
 	redisLabelMode   = "redis.strategy.backups.cozystack.io/mode"
 	redisModeBackup  = "backup"
 	redisModeRestore = "restore"
+	// redisModeCleanup renders the strategy as a one-shot object-delete Job that
+	// removes a deleted Backup's object from the bucket. It never contacts Redis,
+	// so it works after the source app is gone.
+	redisModeCleanup = "cleanup"
+
+	// redisSkipArtifactCleanupAnnotation, set to "true" on a Backup, releases it
+	// from Terminating without deleting its object — the escape hatch for a
+	// Backup wedged on an unreachable bucket. The object is left behind.
+	redisSkipArtifactCleanupAnnotation = "backups.cozystack.io/skip-artifact-cleanup"
 
 	// Driver-metadata key prefix used to round-trip BackupClassStrategy
 	// parameters through the Backup artifact, so a later RestoreJob can
@@ -397,6 +406,14 @@ func ensureBackupBatchJob(
 	}
 
 	desired := buildJobStrategyBatchJob(namespace, name, labels, rendered)
+	// Promote the strategy's Pod-level activeDeadlineSeconds to the Job so it
+	// bounds the whole run: buildJobStrategyBatchJob sets backoffLimit=2, and a
+	// Pod-level deadline alone would let a wedged run burn (backoffLimit+1) x the
+	// deadline before the Job reports Failed, widening the window a cron Plan
+	// stacks behind. A Job-level deadline caps the aggregate regardless of retries.
+	if d := desired.Spec.Template.Spec.ActiveDeadlineSeconds; d != nil && desired.Spec.ActiveDeadlineSeconds == nil {
+		desired.Spec.ActiveDeadlineSeconds = d
+	}
 	if err := controllerutil.SetControllerReference(owner, desired, scheme); err != nil {
 		return nil, fmt.Errorf("set controller reference on backup Job: %w", err)
 	}
@@ -672,4 +689,173 @@ func (r *RestoreJobReconciler) ensureRedisRestoreJob(
 		labels[k] = v
 	}
 	return ensureBackupBatchJob(ctx, r.Client, r.Scheme, owner, namespace, name, labels, rendered)
+}
+
+// ---------------------------------------------------------------------------
+// Backup deletion cleanup
+// ---------------------------------------------------------------------------
+
+// cleanupRedisBackup deletes the object a Backup names when the Backup is
+// removed. Unlike the operator-backed drivers, the Redis driver OWNS its
+// artifact - redisObjectKey mints one object per BackupJob and no engine
+// retention prunes it - so without this a retention-pruned Plan would grow the
+// bucket unboundedly and the object's key would be lost with the CR. It spawns
+// a one-shot cleanup-mode Job (which never contacts Redis, only S3) and WAITS
+// for it before releasing the finalizer, so no object is orphaned. Mirrors
+// cleanupRabbitmqBackup; the object key comes from the Backup's DriverMetadata
+// rather than a status.artifact.URI.
+func (r *BackupReconciler) cleanupRedisBackup(ctx context.Context, backup *backupsv1alpha1.Backup) (ctrl.Result, error) {
+	logger := getLogger(ctx)
+
+	// Escape hatch: release a Backup stuck Terminating (bucket unreachable) by
+	// setting the annotation. Reap any in-flight delete Job and let it go,
+	// leaving the object in the bucket.
+	if backup.Annotations[redisSkipArtifactCleanupAnnotation] == "true" {
+		existing := &batchv1.Job{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: backup.Namespace, Name: backup.Name + "-cleanup"}, existing); err == nil {
+			_ = r.deleteRedisCleanupJob(ctx, existing)
+		}
+		logger.Debug("skipping Redis artifact cleanup per annotation; object left in bucket", "backup", backup.Name, "annotation", redisSkipArtifactCleanupAnnotation)
+		return ctrl.Result{}, nil
+	}
+
+	objectKey := backup.Spec.DriverMetadata[redisObjectMetaKey]
+	if objectKey == "" {
+		// A Backup written before object keys were recorded names no object to
+		// delete; nothing to do.
+		return ctrl.Result{}, nil
+	}
+
+	strategy := &strategyv1alpha1.Redis{}
+	if err := r.Get(ctx, client.ObjectKey{Name: backup.Spec.StrategyRef.Name}, strategy); err != nil {
+		if apierrors.IsNotFound(err) {
+			// No strategy to render the delete Job from (the shipped one is gated
+			// on a resolved bucket name and stops rendering if that lookup fails).
+			// Release rather than wedge the Backup forever; the object is left.
+			return r.releaseRedisCleanup(ctx, backup, objectKey, "strategy CR is gone"), nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	jobName := backup.Name + "-cleanup"
+	job := &batchv1.Job{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: backup.Namespace, Name: jobName}, job)
+	switch {
+	case apierrors.IsNotFound(err):
+		// Spawning the delete Job and projecting the credentials Secret it needs
+		// are CREATEs, which NamespaceLifecycle admission forbids in a Terminating
+		// namespace. When the namespace is going away, release the Backup so
+		// teardown can finish; the object cannot be deleted from a namespace that
+		// no longer exists, so it is left behind.
+		terminating, nsErr := r.namespaceTerminating(ctx, backup.Namespace)
+		if nsErr != nil {
+			return ctrl.Result{}, nsErr
+		}
+		if terminating {
+			return r.releaseRedisCleanup(ctx, backup, objectKey, "namespace is terminating"), nil
+		}
+		if perr := ProjectBackupCredentials(ctx, r.Client, r.CredentialsConfig, backup.Namespace); perr != nil {
+			return r.releaseRedisCleanup(ctx, backup, objectKey, fmt.Sprintf("cannot project credentials: %v", perr)), nil
+		}
+		// Cleanup mode reads only .Release, .Mode and .ObjectKey (never
+		// .Application), so the source app being already gone does not matter.
+		rendered, rerr := renderRedisTemplate(
+			strategy.Spec.Template,
+			nil,
+			backup.Spec.ApplicationRef.Name,
+			backup.Namespace,
+			redisModeCleanup,
+			objectKey,
+			redisStrategyParameters(backup),
+			nil,
+		)
+		if rerr != nil {
+			return r.releaseRedisCleanup(ctx, backup, objectKey, fmt.Sprintf("cleanup template render failed: %v", rerr)), nil
+		}
+		if cerr := r.Create(ctx, buildRedisCleanupJob(backup.Namespace, jobName, rendered)); cerr != nil && !apierrors.IsAlreadyExists(cerr) {
+			// Forbidden (namespace went Terminating after the check) or Invalid
+			// (a >55-char Backup name makes <name>-cleanup exceed 63 chars) cannot
+			// be fixed by retrying; release. Other errors are transient - requeue.
+			if apierrors.IsForbidden(cerr) || apierrors.IsInvalid(cerr) {
+				return r.releaseRedisCleanup(ctx, backup, objectKey, fmt.Sprintf("cannot create cleanup Job: %v", cerr)), nil
+			}
+			return ctrl.Result{}, cerr
+		}
+		return ctrl.Result{RequeueAfter: redisPollInterval}, nil
+	case err != nil:
+		return ctrl.Result{}, err
+	}
+
+	if !job.DeletionTimestamp.IsZero() {
+		// A prior failed attempt is being collected; wait, then the NotFound
+		// branch recreates a fresh one.
+		return ctrl.Result{RequeueAfter: redisPollInterval}, nil
+	}
+
+	switch jobConditionState(job) {
+	case batchv1.JobComplete:
+		// Object deleted (a missing object is success in the script): drop the
+		// Job and let the Backup go.
+		_ = r.deleteRedisCleanupJob(ctx, job)
+		logger.Debug("Redis backup object deleted", "backup", backup.Name, "object", objectKey)
+		return ctrl.Result{}, nil
+	case batchv1.JobFailed:
+		// The delete genuinely failed. Collect the failed Job so the NotFound
+		// branch recreates a fresh one, and keep the Backup Terminating.
+		logger.Debug("Redis cleanup Job failed; retrying", "backup", backup.Name, "job", jobName)
+		_ = r.deleteRedisCleanupJob(ctx, job)
+		return ctrl.Result{RequeueAfter: redisPollInterval}, nil
+	default:
+		return ctrl.Result{RequeueAfter: redisPollInterval}, nil
+	}
+}
+
+// deleteRedisCleanupJob removes a cleanup Job and its Pod. Mirrors
+// deleteRabbitmqCleanupJob.
+func (r *BackupReconciler) deleteRedisCleanupJob(ctx context.Context, job *batchv1.Job) error {
+	policy := metav1.DeletePropagationBackground
+	return client.IgnoreNotFound(r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &policy}))
+}
+
+// releaseRedisCleanup gives up deleting the object and lets the Backup be
+// removed, recording a Warning Event naming the object left behind so the
+// give-up is visible. So the delete is best-effort, not guaranteed. Mirrors
+// releaseRabbitmqCleanup.
+func (r *BackupReconciler) releaseRedisCleanup(ctx context.Context, backup *backupsv1alpha1.Backup, objectKey, reason string) ctrl.Result {
+	getLogger(ctx).Info("releasing Backup without deleting its object", "backup", backup.Name, "object", objectKey, "reason", reason)
+	if r.Recorder != nil {
+		r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactNotDeleted", "left object %s in the bucket: %s", objectKey, reason)
+	}
+	return ctrl.Result{}
+}
+
+// buildRedisCleanupJob wraps the cleanup-mode pod in a one-shot, ownerless Job.
+// Ownerless because cleanupRedisBackup manages its lifecycle explicitly and it
+// must outlive the Backup being deleted; activeDeadlineSeconds + TTL are
+// backstops if the controller stops mid-wait. Mirrors buildRabbitmqCleanupJob.
+func buildRedisCleanupJob(namespace, name string, rendered *corev1.PodTemplateSpec) *batchv1.Job {
+	pod := *rendered.DeepCopy()
+	if pod.Spec.RestartPolicy == "" {
+		pod.Spec.RestartPolicy = corev1.RestartPolicyNever
+	}
+	if pod.Labels == nil {
+		pod.Labels = map[string]string{}
+	}
+	pod.Labels[redisLabelMode] = redisModeCleanup
+	backoffLimit := int32(1)
+	activeDeadline := int64(300)
+	ttl := int32(300)
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      name,
+			Labels:    map[string]string{redisLabelMode: redisModeCleanup},
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit:            &backoffLimit,
+			ActiveDeadlineSeconds:   &activeDeadline,
+			TTLSecondsAfterFinished: &ttl,
+			Template:                pod,
+		},
+	}
 }

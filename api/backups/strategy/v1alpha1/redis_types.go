@@ -61,7 +61,12 @@ type RedisSpec struct {
 	//     `.Application.spec.replicas`).
 	//   - `.Release.Name` and `.Release.Namespace` — the application's name
 	//     and namespace.
-	//   - `.Mode` — `"backup"` or `"restore"`, identifying the run.
+	//   - `.Mode` — `"backup"`, `"restore"`, or `"cleanup"` (delete the object
+	//     of a removed Backup), identifying the run.
+	//   - `.ObjectKey` — the object-storage key for this run: unique per backup,
+	//     and on restore/cleanup the exact key recorded on the Backup, so a Plan
+	//     keeps one object per run and a restore reads back the one it names
+	//     rather than whatever last overwrote a shared path.
 	//   - `.Parameters` — the resolved BackupClass strategy parameters.
 	//   - `.Backup` — only on restore runs: `.Backup.Name`, `.Backup.Namespace`
 	//     and `.Backup.ApplicationRef` describing the source backup, so a

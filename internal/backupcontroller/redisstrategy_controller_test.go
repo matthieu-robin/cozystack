@@ -101,7 +101,9 @@ func newRedisTestEnv(t *testing.T, app *unstructured.Unstructured, builder *clie
 }
 
 // newRedisStrategy returns a Redis strategy whose template exercises every key
-// the driver exposes: .Release, .Mode, .Parameters, and .Application.
+// the driver exposes: .Release, .Mode, .ObjectKey, .Parameters, and
+// .Application. --key pins the object-key plumbing (unique per backup, read
+// back on restore) so a regression that stopped rendering it is caught.
 func newRedisStrategy(name string) *strategyv1alpha1.Redis {
 	return &strategyv1alpha1.Redis{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -117,6 +119,7 @@ func newRedisStrategy(name string) *strategyv1alpha1.Redis {
 							"--mode={{ .Mode }}",
 							"--bucket={{ .Parameters.bucketName }}",
 							"--replicas={{ .Application.spec.replicas }}",
+							"--key={{ .ObjectKey }}",
 						},
 					}},
 				},
@@ -243,7 +246,9 @@ func TestReconcileRedis_CreatesBatchJob(t *testing.T) {
 		t.Errorf("expected mode label %q, got %q", redisModeBackup, got)
 	}
 	args := k8sJob.Spec.Template.Spec.Containers[0].Args
-	want := []string{"--app=cache", "--mode=backup", "--bucket=redis-bucket", "--replicas=3"}
+	// --key pins that the per-BackupJob object key reaches the rendered Job;
+	// without it a Plan's history would collapse onto one object.
+	want := []string{"--app=cache", "--mode=backup", "--bucket=redis-bucket", "--replicas=3", "--key=tenant-test/cache/test-bj.rdb"}
 	for i, w := range want {
 		if i >= len(args) || args[i] != w {
 			t.Errorf("rendered args[%d]: want %q, got %q", i, w, args)
@@ -626,6 +631,7 @@ func TestReconcileRedisRestore_CreatesBatchJobInTargetNamespace(t *testing.T) {
 							"--mode={{ .Mode }}",
 							"--source={{ .Backup.ApplicationRef.Name }}",
 							"--bucket={{ .Parameters.bucketName }}",
+							"--key={{ .ObjectKey }}",
 						},
 					}},
 				},
@@ -642,8 +648,11 @@ func TestReconcileRedisRestore_CreatesBatchJobInTargetNamespace(t *testing.T) {
 				Kind:     strategyv1alpha1.RedisStrategyKind,
 				Name:     "redis-strategy",
 			},
-			TakenAt:        now,
-			DriverMetadata: map[string]string{redisParamPrefix + "bucketName": "redis-bucket"},
+			TakenAt: now,
+			DriverMetadata: map[string]string{
+				redisParamPrefix + "bucketName": "redis-bucket",
+				redisObjectMetaKey:              "tenant-test/cache/redis-backup.rdb",
+			},
 		},
 	}
 	restoreJob := &backupsv1alpha1.RestoreJob{
@@ -680,7 +689,10 @@ func TestReconcileRedisRestore_CreatesBatchJobInTargetNamespace(t *testing.T) {
 	args := k8sJob.Spec.Template.Spec.Containers[0].Args
 	// to-copy: --app renders to the TARGET (cache-copy), --source to the backup's
 	// SOURCE applicationRef (cache), so the restore reads the source's prefix.
-	want := []string{"--app=cache-copy", "--mode=restore", "--source=cache", "--bucket=redis-bucket"}
+	// --key renders to the exact object recorded on the Backup, not a value
+	// recomputed from the target, so the restore reads back the object its
+	// Backup names.
+	want := []string{"--app=cache-copy", "--mode=restore", "--source=cache", "--bucket=redis-bucket", "--key=tenant-test/cache/redis-backup.rdb"}
 	for i, w := range want {
 		if i >= len(args) || args[i] != w {
 			t.Errorf("rendered restore args[%d]: want %q, got %q", i, w, args)

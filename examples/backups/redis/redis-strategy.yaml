@@ -154,7 +154,7 @@ spec:
                   sleep 1
                 done
                 if ! redis-cli -p 6399 PING >/dev/null 2>&1; then
-                  echo "throwaway redis failed to load the RDB (version too new for the image?)" >&2
+                  echo "throwaway redis did not become ready: dataset likely exceeds the restore memory limit, or the RDB version is newer than the image" >&2
                   exit 1
                 fi
                 redis-cli -p 6399 CONFIG SET aof-use-rdb-preamble no >/dev/null
@@ -163,7 +163,10 @@ spec:
                   [ "$(redis-cli -p 6399 INFO persistence | tr -d '\r' | awk -F: '/aof_rewrite_in_progress:/{print $2}')" = "0" ] && break
                   sleep 1
                 done
-                REPLAY=$(ls /tmp/restore/appendonlydir/*.base.aof 2>/dev/null | head -1)
+                # find (not `ls`) so no-match returns 0: under pipefail a failed
+                # ls would abort before the -z guard, so the diagnostic below
+                # would never print.
+                REPLAY=$(find /tmp/restore/appendonlydir -name '*.base.aof' 2>/dev/null | head -n1 || true)
                 if [ -z "${REPLAY}" ]; then
                   echo "throwaway redis produced no base AOF to replay" >&2
                   exit 1

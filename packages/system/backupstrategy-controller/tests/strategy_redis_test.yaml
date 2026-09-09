@@ -60,21 +60,22 @@ tests:
                 key: endpoint
                 optional: true
 
-  - it: "endpointCASecretName set: CA volume mounted at /etc/s3-ca and REQUIRED (not optional)"
+  - it: "endpointCASecretName set: CA volume mounted at /etc/s3-ca, optional so a missing Secret does not wedge the Pod"
     set:
       backupStorage.endpointCASecretName: my-s3-ca
     asserts:
+      # Optional, because nothing projects this Secret into the app namespace:
+      # a required mount would wedge the Pod on FailedMount (never a Failed Job)
+      # until the deadline when the admin has not created it. A missing ca.crt
+      # falls through to the system CA store and fails the handshake fast; it
+      # does not skip verification.
       - contains:
           path: spec.template.spec.volumes
           content:
             name: s3-ca
             secret:
               secretName: my-s3-ca
-      # The S3 CA (volumes[1], after the always-present redis-ca) must be
-      # required: a missing CA has to fail the Pod, never silently fall through
-      # to skip-verify.
-      - notExists:
-          path: spec.template.spec.volumes[1].secret.optional
+              optional: true
       - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
