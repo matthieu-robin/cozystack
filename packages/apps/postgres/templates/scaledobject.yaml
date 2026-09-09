@@ -5,9 +5,11 @@ is NOT enabled by default, but autoscaling.enabled is a tenant-facing knob, so a
 tenant can turn it on against a cluster where the admin never enabled `keda`.
 Without this guard the ScaledObject renders against an unknown kind and the whole
 database HelmRelease fails with an opaque `no matches for kind "ScaledObject"`.
-We must NOT instead skip rendering: db.yaml already drops the static
-`.spec.instances` under active autoscaling, so a missing ScaledObject would let
-CNPG collapse the cluster to 1 instance. Stop with an actionable message instead.
+We must NOT instead silently skip rendering: db.yaml seeds `.spec.instances` at a
+static `max(replicas, effectiveMin)` under active autoscaling, so a skipped
+ScaledObject would leave the tenant with a fixed-size cluster and no HPA — the
+autoscaling they asked for silently absent, with nothing to signal it. Stop with an
+actionable message instead.
 */ -}}
 {{- if not (.Capabilities.APIVersions.Has "keda.sh/v1alpha1") }}
 {{- fail "postgres: autoscaling.enabled is set, but the KEDA platform package is not installed (keda.sh/v1alpha1 is unknown to the cluster). Ask your platform admin to enable the 'keda' package before enabling database autoscaling." }}
