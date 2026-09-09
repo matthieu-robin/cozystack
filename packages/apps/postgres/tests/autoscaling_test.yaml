@@ -182,6 +182,12 @@ tests:
       - matchRegex:
           path: spec.triggers[0].metadata.query
           pattern: label_cnpg_io_instance_role="replica"
+      # the kube_pod_labels join pins job="kube-state-metrics", parity with the alert
+      # rules, so a duplicate kube_pod_labels series from another exporter cannot
+      # multiply the join.
+      - matchRegex:
+          path: spec.triggers[0].metadata.query
+          pattern: kube_pod_labels\{job="kube-state-metrics"
       # ...and scoped to THIS cluster by release name, so a namespace with multiple
       # postgres clusters does not cross-count. The dashboard read-load panel mirrors
       # this per-cluster scoping (label_cnpg_io_cluster).
@@ -560,7 +566,7 @@ tests:
       # (which carry cnpg.io/cluster but jobRole, not instanceRole) don't inflate it
       - matchRegex:
           path: spec.triggers[0].metadata.query
-          pattern: count\(kube_pod_labels\{namespace="tenant-acme",label_cnpg_io_cluster="postgres-db",label_cnpg_io_instance_role=~".\+"\}\) \* 150
+          pattern: count\(kube_pod_labels\{job="kube-state-metrics",namespace="tenant-acme",label_cnpg_io_cluster="postgres-db",label_cnpg_io_instance_role=~".\+"\}\) \* 150
       # the frozen summand is floored with `or vector(0)` so a kube-state-metrics
       # scrape gap (empty count) cannot empty the whole `+` sum and defeat the
       # base term's own floor

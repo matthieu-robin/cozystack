@@ -174,7 +174,7 @@ provisioning so it no longer errors there; it stays opt-in / not-live-validated.
 {{- $ns := .Release.Namespace -}}
 {{- $rel := .Release.Name -}}
 {{- $target := .Values.autoscaling.target -}}
-{{- $joinReplica := printf "* on(namespace,pod) group_left() kube_pod_labels{namespace=%q,label_cnpg_io_cluster=%q,label_cnpg_io_instance_role=\"replica\"}" $ns $rel -}}
+{{- $joinReplica := printf "* on(namespace,pod) group_left() kube_pod_labels{job=\"kube-state-metrics\",namespace=%q,label_cnpg_io_cluster=%q,label_cnpg_io_instance_role=\"replica\"}" $ns $rel -}}
 {{- /* Read-load term Σ. The floor is GATED on the existence of ANY instance pod
        (instance_role=~".+", primary OR replica), not replica-only: `or (vector(0) and
        on() (count(...instance_role=~".+") > 0))` returns 0 whenever the cluster has a
@@ -187,7 +187,7 @@ provisioning so it no longer errors there; it stays opt-in / not-live-validated.
        basebackup that routinely exceeds the alert's 15m window. The primary always exists
        during provisioning, so gating on any instance role floors correctly there. This is
        the fail-safe separation of no-load from no-series. */ -}}
-{{- $idleFloor := printf "(vector(0) and on() (count(kube_pod_labels{namespace=%q,label_cnpg_io_cluster=%q,label_cnpg_io_instance_role=~\".+\"}) > 0))" $ns $rel -}}
+{{- $idleFloor := printf "(vector(0) and on() (count(kube_pod_labels{job=\"kube-state-metrics\",namespace=%q,label_cnpg_io_cluster=%q,label_cnpg_io_instance_role=~\".+\"}) > 0))" $ns $rel -}}
 {{- $load := "" -}}
 {{- if eq .Values.autoscaling.metric "ReadCPUUtilization" -}}
 {{- $load = printf "((sum(rate(container_cpu_usage_seconds_total{namespace=%q,container=\"postgres\"}[5m]) %s) * 1000) or %s)" $ns $joinReplica $idleFloor -}}
@@ -200,7 +200,7 @@ provisioning so it no longer errors there; it stays opt-in / not-live-validated.
 {{- $base -}}
 {{- else -}}
 {{- /* Cluster-wide join (all instances) for the lag and WAL-write terms. */ -}}
-{{- $joinCluster := printf "* on(namespace,pod) group_left() kube_pod_labels{namespace=%q,label_cnpg_io_cluster=%q}" $ns $rel -}}
+{{- $joinCluster := printf "* on(namespace,pod) group_left() kube_pod_labels{job=\"kube-state-metrics\",namespace=%q,label_cnpg_io_cluster=%q}" $ns $rel -}}
 {{- $cooldown := "5m" -}}
 {{- /* Each gate is individually floored with `or vector(0)`: if its source series
        is absent (a CNPG that does not emit cnpg_pg_replication_lag /
@@ -218,7 +218,7 @@ provisioning so it no longer errors there; it stays opt-in / not-live-validated.
        carry jobRole, not instanceRole), and kube-state-metrics reports them until
        GC. Without this filter a lingering join Job pod inflates the frozen count
        while the brake is engaged, nudging desired up instead of holding it. */ -}}
-{{- $frozen := printf "(count(kube_pod_labels{namespace=%q,label_cnpg_io_cluster=%q,label_cnpg_io_instance_role=~\".+\"}) * %v)" $ns $rel $target -}}
+{{- $frozen := printf "(count(kube_pod_labels{job=\"kube-state-metrics\",namespace=%q,label_cnpg_io_cluster=%q,label_cnpg_io_instance_role=~\".+\"}) * %v)" $ns $rel $target -}}
 {{- /* base when not braking, frozen (= currentInstances * target) when braking.
        The frozen summand carries a defensive `or vector(0)`, but note it is a no-op
        given the surrounding expression, NOT a floor that ever changes the result: the
