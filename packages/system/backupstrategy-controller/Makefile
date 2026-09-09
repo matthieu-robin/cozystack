@@ -4,6 +4,10 @@ NAMESPACE=cozy-backup-controller
 include ../../../hack/common-envs.mk
 include ../../../hack/package.mk
 
+# PHONY so a stray file/dir named `image` cannot mark the aggregate up to date
+# and skip both builds.
+.PHONY: image image-backupstrategy-controller image-redis-backup
+
 image: image-backupstrategy-controller image-redis-backup
 
 image-backupstrategy-controller:
@@ -16,7 +20,10 @@ image-backupstrategy-controller:
 		yq -i '.backupStrategyController.image = strenv(IMAGE)' values.yaml
 	rm -f images/backupstrategy-controller.json
 
-image-redis-backup:
+# Depends on image-backupstrategy-controller so the two recipes never rewrite
+# values.yaml concurrently under `make -j image` — each stamps a digest with
+# `yq -i`, and a concurrent write would drop one of them.
+image-redis-backup: image-backupstrategy-controller
 	docker buildx build -f images/redis-backup/Dockerfile images/redis-backup \
 		$(call image-tags,redis-backup,v$(COZYSTACK_VERSION)) \
 		$(call cache-args,redis-backup) \

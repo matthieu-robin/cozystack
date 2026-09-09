@@ -2,7 +2,10 @@
 # Cleanup: tear down everything provisioned by the demo so the cluster returns
 # to its previous state. Idempotent — safe to run before a fresh round (a stale
 # Succeeded BackupJob would otherwise falsely satisfy the wait).
-set -uo pipefail
+# -e so a real API/permission failure aborts loudly instead of printing "Cleanup
+# complete." over a half-torn-down demo; every delete below is
+# --ignore-not-found, so an already-gone resource is not an error.
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/00-helpers.sh"

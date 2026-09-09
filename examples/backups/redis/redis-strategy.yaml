@@ -159,16 +159,24 @@ spec:
                 fi
                 redis-cli -p 6399 CONFIG SET aof-use-rdb-preamble no >/dev/null
                 redis-cli -p 6399 CONFIG SET appendonly yes >/dev/null
+                # Wait for the rewrite to FINISH (no rewrite in flight, last one
+                # ok, base AOF on disk), not merely for in_progress:0 which can
+                # fall through before the scheduled rewrite starts. find (not
+                # `ls`) returns 0 on no-match under pipefail; REPLAY is set each
+                # iteration so it survives the loop.
+                REPLAY=""
                 for _ in $(seq 1 300); do
-                  [ "$(redis-cli -p 6399 INFO persistence | tr -d '\r' | awk -F: '/aof_rewrite_in_progress:/{print $2}')" = "0" ] && break
+                  persistence=$(redis-cli -p 6399 INFO persistence | tr -d '\r')
+                  inprog=$(echo "${persistence}" | awk -F: '/aof_rewrite_in_progress:/{print $2}')
+                  status=$(echo "${persistence}" | awk -F: '/aof_last_bgrewrite_status:/{print $2}')
+                  REPLAY=$(find /tmp/restore/appendonlydir -name '*.base.aof' 2>/dev/null | head -n1 || true)
+                  if [ "${inprog}" = "0" ] && [ "${status}" = "ok" ] && [ -n "${REPLAY}" ]; then
+                    break
+                  fi
                   sleep 1
                 done
-                # find (not `ls`) so no-match returns 0: under pipefail a failed
-                # ls would abort before the -z guard, so the diagnostic below
-                # would never print.
-                REPLAY=$(find /tmp/restore/appendonlydir -name '*.base.aof' 2>/dev/null | head -n1 || true)
                 if [ -z "${REPLAY}" ]; then
-                  echo "throwaway redis produced no base AOF to replay" >&2
+                  echo "throwaway redis produced no base AOF to replay (rewrite did not finish)" >&2
                   exit 1
                 fi
                 tgt FLUSHALL
