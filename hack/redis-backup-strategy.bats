@@ -15,6 +15,12 @@
 # paths resolve against that cwd. Each @test builds its own fixture; a
 # load-bearing assertion is never the last line (cozytest.sh rewrites a lone
 # `}` into `return 0` + `}`, which would swallow the final command's status).
+#
+# The rendered script is run with `bash`, not `sh`: it opens `set -euo
+# pipefail`, which the production image's busybox ash supports but the CI
+# runner's /bin/sh (dash) rejects at line 1. bash matches ash's pipefail
+# semantics; same reason hack/migration-50-etcd-adopt.bats runs its script
+# with bash.
 
 CHART=packages/system/backupstrategy-controller
 
@@ -95,7 +101,7 @@ s3_env() {
   make_stubs "$tmp/bin" "$tmp/rc.log" "$tmp/curl.log"
   render_script "$tmp/s.sh" cleanup myapp "tenant-x/myapp/bkp-42.rdb" "$tmp/sb"
   s3_env
-  PATH="$tmp/bin:$PATH" sh "$tmp/s.sh"
+  PATH="$tmp/bin:$PATH" bash "$tmp/s.sh"
   # A DELETE against exactly this backup's object.
   grep -q -- '-X DELETE' "$tmp/curl.log"
   grep -q 'tenant-x/myapp/bkp-42.rdb' "$tmp/curl.log"
@@ -112,7 +118,7 @@ s3_env() {
   make_stubs "$tmp/bin" "$tmp/rc.log" "$tmp/curl.log"
   render_script "$tmp/s.sh" backup myapp "tenant-x/myapp/bkp-42.rdb" "$tmp/sb"
   s3_env
-  PATH="$tmp/bin:$PATH" sh "$tmp/s.sh"
+  PATH="$tmp/bin:$PATH" bash "$tmp/s.sh"
   # Sentinel host carries the rfs-redis- prefix owned by the redis chart.
   grep -q -- '-h rfs-redis-myapp -p 26379' "$tmp/rc.log"
   grep -q 'get-master-addr-by-name mymaster' "$tmp/rc.log"
@@ -130,7 +136,7 @@ s3_env() {
   render_script "$tmp/s.sh" bogus myapp "tenant-x/myapp/bkp-42.rdb" "$tmp/sb"
   s3_env
   # No bats `run` helper under hack/cozytest.sh, so capture the status directly.
-  if PATH="$tmp/bin:$PATH" sh "$tmp/s.sh" 2>/dev/null; then
+  if PATH="$tmp/bin:$PATH" bash "$tmp/s.sh" 2>/dev/null; then
     echo "FAIL: an unrecognised mode must exit non-zero"
     false
   fi
