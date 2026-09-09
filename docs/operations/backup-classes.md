@@ -227,6 +227,20 @@ spec:
 
 The platform chart forwards this block into the child `Package cozystack.backupstrategy-controller` as `components.backupstrategy-controller.values.backupStorage` (`packages/core/platform/templates/bundles/system.yaml`), from where the cozystack operator merges it into the `backupstrategy-controller` HelmRelease over the chart defaults. Two paths that look plausible do **not** work: `spec.components.backupstrategy-controller` on the `cozystack.cozystack-platform` Package is silently ignored (the only component under that PackageSource is `platform`), and patching the child `Package cozystack.backupstrategy-controller` directly is reverted whenever the platform helm-reconcile re-renders it.
 
+A sibling `backupStrategyController` block on the same `platform` component is forwarded the same way, for the controller's own knobs rather than the bucket. The one an operator reaches for is `redisBackupResources`, which sizes the Redis strategy Pod — restore loads the whole dataset into a throwaway loader, so a large Redis needs more memory / ephemeral-storage than the defaults (the loader-not-ready log line points here):
+
+```yaml
+spec:
+  components:
+    platform:
+      values:
+        backupStrategyController:
+          redisBackupResources:
+            limits:
+              memory: 8Gi
+              ephemeral-storage: 32Gi
+```
+
 | Knob | Effect |
 |---|---|
 | `provisionBucket` | Toggle creation of the in-cluster `apps.cozystack.io/Bucket` CR. Set `false` for external S3 (see [Disabling the platform-managed bucket](#disabling-the-platform-managed-bucket)). |
@@ -234,7 +248,7 @@ The platform chart forwards this block into the child `Package cozystack.backups
 | `namespace` | Namespace the Bucket CR (and its system-credentials Secret) lives in — `tenant-root` by default. Must be a tenant namespace (`tenant-*`): the Bucket chart's RBAC helper fails the Helm render for any other prefix. |
 | `bucketNameOverride` | Escape hatch for offline `helm template` renders — bypasses the live-cluster BucketClaim lookup. Leave empty in production. |
 | `endpoint` | **Fallback** S3 endpoint. For a provisioned bucket the strategy CRs + Velero BSL derive the endpoint from the COSI system Secret (external ACME ingress, forced `https://`) instead; this value is used only for external S3 (`provisionBucket: false`) and offline renders. For external S3, switching it to `https://` enables TLS in the MariaDB/FoundationDB strategies and makes the Redis dump Job connect over TLS — ensure the CA bundle is reachable to the relevant operator/driver Pods first (for Redis, via `endpointCASecretName` below). |
-| `endpointCASecretName` | Optional Secret (key `ca.crt`) in the app namespace the Redis Job trusts for a self-signed S3 endpoint. Empty by default: the projected endpoint is always `https://` and the platform bucket's ACME cert verifies against the image's system CA store unaided. Set it only for a private CA; when set the Secret is required, so a missing one fails the Pod rather than silently skipping verification. |
+| `endpointCASecretName` | Optional Secret (key `ca.crt`) in the app namespace the Redis Job trusts for a self-signed S3 endpoint. Empty by default: the projected endpoint is always `https://` and the platform bucket's ACME cert verifies against the image's system CA store unaided. Set it only for a private CA. The Job mounts it optionally (nothing projects this Secret automatically), so a name typo does not wedge the Pod on `FailedMount`: a missing `ca.crt` falls through to the system CA store and the Job fails fast at the TLS handshake with a legible error — it does not skip verification, which still needs the explicit `insecureSkipTLSVerify` opt-in. |
 | `insecureSkipTLSVerify` | Disables S3 certificate verification for the Redis Job (`curl -k`). `false` by default and an explicit opt-in, never a fallback — an untrusted-cert endpoint fails closed unless this is set. Prefer `endpointCASecretName`. |
 | `region` | Re-projected into `cozy-backups-creds` on the next reconcile. Pod-restart required for chart-emitted clients consuming the region via env (ClickHouse sidecar today). |
 | `forcePathStyle` | Path-style addressing; SeaweedFS S3 requires it, AWS S3 typically doesn't. |

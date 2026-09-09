@@ -29,7 +29,9 @@ spec:
       # Bound a wedged run (e.g. redis-cli --rdb blocking on a stalled master)
       # so it becomes a Failed Job the driver reports, instead of a Pod the cron
       # Plan keeps stacking behind. The job-in-progress path has no other deadline.
-      activeDeadlineSeconds: {{ .Values.backupStrategyController.redisBackupActiveDeadlineSeconds }}
+      # int so a large values-file override (parsed as float64) renders as an
+      # integer, not exponent form (1e+06), which would fail schema validation.
+      activeDeadlineSeconds: {{ int .Values.backupStrategyController.redisBackupActiveDeadlineSeconds }}
       volumes:
         # The Redis app's own CA. The chart moves Redis and Sentinel to a
         # TLS-only listener when the app has tls.enabled and publishes the CA at
@@ -228,12 +230,14 @@ spec:
                 fi
               }
 
+              # Explicit modes only — an unrecognised MODE must NOT fall into the
+              # destructive restore branch (FLUSHALL + replay into the master).
               if [ "${MODE}" = "backup" ]; then
                 echo "dumping RDB from master ${MHOST}:${MPORT}"
                 tgt --rdb /tmp/dump.rdb
                 echo "uploading s3://${S3_BUCKET}/${KEY}"
                 s3 -X PUT --upload-file /tmp/dump.rdb "${OBJ}"
-              else
+              elif [ "${MODE}" = "restore" ]; then
                 echo "downloading s3://${S3_BUCKET}/${KEY}"
                 s3 -o /tmp/dump.rdb "${OBJ}"
                 # Replay by loading the RDB into a throwaway local redis and
@@ -295,6 +299,9 @@ spec:
                 tgt --pipe < "${REPLAY}"
                 redis-cli -p 6399 SHUTDOWN NOSAVE >/dev/null 2>&1 || true
                 echo "restore complete into ${MHOST}:${MPORT}"
+              else
+                echo "unknown mode: ${MODE}" >&2
+                exit 1
               fi
           # On restore the throwaway loader holds the whole dataset in memory and
           # materialises the RDB plus its AOF rewrite on disk, so memory and

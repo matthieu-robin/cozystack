@@ -91,32 +91,9 @@ spec:
               : "${AWS_SECRET_ACCESS_KEY:?missing AWS_SECRET_ACCESS_KEY in redis-backup-creds}"
 
               MODE="{{ .Mode }}"
-              SENTINEL="rfs-redis-{{ .Release.Name }}"
               KEY="{{ .ObjectKey }}"
 
-              # Server-side TLS: present iff the app has tls.enabled (see the
-              # optional redis-ca mount) — mirrors the shipped strategy.
-              RTLS=""
-              if [ -f /etc/redis-ca/ca.crt ]; then
-                RTLS="--tls --cacert /etc/redis-ca/ca.crt"
-              fi
-
-              addr=$(redis-cli ${RTLS} -h "${SENTINEL}" -p 26379 sentinel get-master-addr-by-name mymaster)
-              MHOST=$(echo "${addr}" | sed -n '1p')
-              MPORT=$(echo "${addr}" | sed -n '2p')
-              if [ -z "${MHOST}" ] || [ -z "${MPORT}" ]; then
-                echo "could not resolve redis master from sentinel ${SENTINEL}" >&2
-                exit 1
-              fi
-
-              tgt() {
-                if [ -n "${REDIS_PASSWORD:-}" ]; then
-                  REDISCLI_AUTH="${REDIS_PASSWORD}" redis-cli ${RTLS} -h "${MHOST}" -p "${MPORT}" "$@"
-                else
-                  redis-cli ${RTLS} -h "${MHOST}" -p "${MPORT}" "$@"
-                fi
-              }
-
+              # S3 transport, needed by every mode (backup, restore, cleanup).
               case "${S3_ENDPOINT}" in
                 http://*|https://*) BASE="${S3_ENDPOINT}" ;;
                 *)                  BASE="https://${S3_ENDPOINT}" ;;
@@ -137,12 +114,54 @@ spec:
               }
               OBJ="${BASE}/${S3_BUCKET}/${KEY}"
 
+              # Cleanup deletes only this backup's object and never touches Redis,
+              # so a deleted Backup must NOT fall into the restore path (which
+              # FLUSHALLs the master). Idempotent — a 404 is success. Mirrors the
+              # shipped strategy.
+              if [ "${MODE}" = "cleanup" ]; then
+                echo "deleting s3://${S3_BUCKET}/${KEY}"
+                code=$(curl -sS -o /dev/null -w '%{http_code}' ${TLS} \
+                  --aws-sigv4 "aws:amz:${S3_REGION}:s3" \
+                  --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" \
+                  -X DELETE "${OBJ}")
+                case "${code}" in
+                  2??|404) echo "deleted (HTTP ${code})"; exit 0 ;;
+                  *)       echo "delete failed: HTTP ${code}" >&2; exit 1 ;;
+                esac
+              fi
+
+              # Server-side TLS: present iff the app has tls.enabled (see the
+              # optional redis-ca mount) — mirrors the shipped strategy.
+              RTLS=""
+              if [ -f /etc/redis-ca/ca.crt ]; then
+                RTLS="--tls --cacert /etc/redis-ca/ca.crt"
+              fi
+
+              SENTINEL="rfs-redis-{{ .Release.Name }}"
+              addr=$(redis-cli ${RTLS} -h "${SENTINEL}" -p 26379 sentinel get-master-addr-by-name mymaster)
+              MHOST=$(echo "${addr}" | sed -n '1p')
+              MPORT=$(echo "${addr}" | sed -n '2p')
+              if [ -z "${MHOST}" ] || [ -z "${MPORT}" ]; then
+                echo "could not resolve redis master from sentinel ${SENTINEL}" >&2
+                exit 1
+              fi
+
+              tgt() {
+                if [ -n "${REDIS_PASSWORD:-}" ]; then
+                  REDISCLI_AUTH="${REDIS_PASSWORD}" redis-cli ${RTLS} -h "${MHOST}" -p "${MPORT}" "$@"
+                else
+                  redis-cli ${RTLS} -h "${MHOST}" -p "${MPORT}" "$@"
+                fi
+              }
+
+              # Explicit modes only — an unrecognised MODE must NOT fall into the
+              # destructive restore branch.
               if [ "${MODE}" = "backup" ]; then
                 echo "dumping RDB from master ${MHOST}:${MPORT}"
                 tgt --rdb /tmp/dump.rdb
                 echo "uploading s3://${S3_BUCKET}/${KEY}"
                 s3 -X PUT --upload-file /tmp/dump.rdb "${OBJ}"
-              else
+              elif [ "${MODE}" = "restore" ]; then
                 echo "downloading s3://${S3_BUCKET}/${KEY}"
                 s3 -o /tmp/dump.rdb "${OBJ}"
                 mkdir -p /tmp/restore
@@ -183,6 +202,9 @@ spec:
                 tgt --pipe < "${REPLAY}"
                 redis-cli -p 6399 SHUTDOWN NOSAVE >/dev/null 2>&1 || true
                 echo "restore complete into ${MHOST}:${MPORT}"
+              else
+                echo "unknown mode: ${MODE}" >&2
+                exit 1
               fi
           resources:
             requests:
