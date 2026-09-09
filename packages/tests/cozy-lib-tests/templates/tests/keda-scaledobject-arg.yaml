@@ -1,8 +1,9 @@
-{{- if or .Values.omit .Values.badRef .Values.badMin -}}
+{{- if or .Values.omit .Values.badRef .Values.badMin .Values.negMin .Values.wantAnnotations -}}
 {{- /* Build a fully-valid argument dict, then either drop exactly one required
        field named by .Values.omit, replace scaleTargetRef with a non-map
-       (.Values.badRef), or set a non-numeric minReplicaCount (.Values.badMin), to
-       exercise each fail-closed guard in isolation. */ -}}
+       (.Values.badRef), set a non-numeric minReplicaCount (.Values.badMin), set a
+       negative minReplicaCount (.Values.negMin), or attach an extra annotation
+       (.Values.wantAnnotations), to exercise each guard / merge path in isolation. */ -}}
 {{- $ref := dict "apiVersion" "postgresql.cnpg.io/v1" "kind" "Cluster" "name" "db" -}}
 {{- if eq .Values.omit "kind" }}{{- $_ := unset $ref "kind" }}{{- end -}}
 {{- if eq .Values.omit "apiVersion" }}{{- $_ := unset $ref "apiVersion" }}{{- end -}}
@@ -10,5 +11,7 @@
 {{- if .Values.omit }}{{- $arg = unset $arg .Values.omit -}}{{- end -}}
 {{- if .Values.badRef }}{{- $arg = set $arg "scaleTargetRef" "not-a-map" -}}{{- end -}}
 {{- if .Values.badMin }}{{- $arg = set $arg "minReplicaCount" "two" -}}{{- end -}}
+{{- if .Values.negMin }}{{- $arg = set $arg "minReplicaCount" -1 -}}{{- end -}}
+{{- if .Values.wantAnnotations }}{{- $arg = set $arg "annotations" (dict "cozystack.io/example" "hi") -}}{{- end -}}
 {{ include "cozy-lib.keda.scaledObject" $arg }}
 {{- end -}}

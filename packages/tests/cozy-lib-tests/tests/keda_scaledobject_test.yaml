@@ -203,3 +203,17 @@ tests:
     set: {badMin: true}
     asserts:
       - failedTemplate: {errorMessage: "cozy-lib.keda.scaledObject: minReplicaCount is required and must be a number"}
+
+  - it: fails closed when minReplicaCount is negative
+    templates: [templates/tests/keda-scaledobject-arg.yaml]
+    set: {negMin: true}
+    asserts:
+      - failedTemplate: {errorMessage: "cozy-lib.keda.scaledObject: minReplicaCount must be >= 0"}
+
+  - it: merges a caller-supplied annotation onto the ScaledObject
+    templates: [templates/tests/keda-scaledobject-arg.yaml]
+    set: {wantAnnotations: true}
+    asserts:
+      - equal:
+          path: metadata.annotations["cozystack.io/example"]
+          value: hi
