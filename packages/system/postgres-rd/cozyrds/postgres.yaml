@@ -16,8 +16,13 @@ metadata:
     # this design avoids. Trade-off: a never-autoscaled release is client-side too, so
     # a chart field that drifts on the live CR is no longer re-asserted (client-side
     # never reads live state; driftDetection is unset) - accepted, the platform relies
-    # on GitOps re-render, and per-instance apply strategy is a follow-up. See
-    # HelmServerSideApplyAnnotation in pkg/config/config.go.
+    # on GitOps re-render, and per-instance apply strategy is a follow-up.
+    # Rollout is gradual, not fleet-wide at the platform upgrade that ships this: an
+    # existing Postgres HelmRelease keeps server-side apply until its Application is next
+    # written through the aggregated API (the ApplicationDefinition reconciler syncs only
+    # chartRef/valuesFrom/labels onto a live HelmRelease, not the apply strategy), so an
+    # upgraded fleet flips one app at a time as each is next reconciled.
+    # See HelmServerSideApplyAnnotation in pkg/config/config.go.
     release.cozystack.io/helm-server-side-apply: "false"
 spec:
   application:

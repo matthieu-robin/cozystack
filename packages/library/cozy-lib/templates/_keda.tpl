@@ -89,6 +89,16 @@ Parameters:
 {{-   end -}}
 {{-   $min := int .minReplicaCount -}}
 {{-   $max := int .maxReplicaCount -}}
+{{- /* A replica floor cannot be negative; reject it before the ordering check so an
+       all-negative or mixed-sign pair (e.g. min -5, max -3, which satisfies max >= min)
+       cannot render a ScaledObject with a nonsensical bound. A negative max with a
+       non-negative min is already caught by the ordering check below. Test the
+       untruncated value: `int` truncates toward zero, so a fractional negative like
+       -0.5 would become $min 0 and slip past a `$min`-based check into exactly the
+       scale-to-zero-capable object the type guard above exists to prevent. */ -}}
+{{-   if lt (float64 .minReplicaCount) 0.0 -}}
+{{-     fail "cozy-lib.keda.scaledObject: minReplicaCount must be >= 0" -}}
+{{-   end -}}
 {{-   if lt $max $min -}}
 {{-     fail "cozy-lib.keda.scaledObject: maxReplicaCount must be >= minReplicaCount" -}}
 {{-   end -}}
