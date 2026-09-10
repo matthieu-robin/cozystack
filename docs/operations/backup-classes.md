@@ -16,6 +16,7 @@ Tenants reference `cozy-default` from `BackupJob`, `Plan`, and `RestoreJob` reso
 | `apps.cozystack.io/MongoDB`      | Percona psmdb operator (pbm) dump    | `strategy.backups.cozystack.io/MongoDB` `cozy-default-mongodb`             |
 | `apps.cozystack.io/Etcd`         | etcd-operator snapshot               | `strategy.backups.cozystack.io/Etcd` `cozy-default-etcd`                   |
 | `apps.cozystack.io/RabbitMQ`     | RabbitMQ definitions (management API) | `strategy.backups.cozystack.io/Rabbitmq` `cozy-default-rabbitmq`          |
+| `apps.cozystack.io/Redis`        | RDB dump Job (sentinel-discovered master) | `strategy.backups.cozystack.io/Redis` `cozy-default-redis`            |
 | `apps.cozystack.io/VMInstance`   | Velero + kubevirt-velero-plugin      | `strategy.backups.cozystack.io/Velero` `cozy-default-velero-vminstance`    |
 | `apps.cozystack.io/VMDisk`       | Velero                               | `strategy.backups.cozystack.io/Velero` `cozy-default-velero-vmdisk`        |
 
@@ -40,6 +41,7 @@ Different operators expect different endpoint shapes; the strategy templates ren
 | FoundationDB    | `blobStoreConfiguration.accountName` + `urlParameters.secure_connection` | bare host:port + derived secure flag |
 | Velero          | `BackupStorageLocation.spec.config.s3Url` | full URL (scheme preserved) |
 | ClickHouse sidecar | `S3_ENDPOINT` env | bare host:port (from projected Secret) |
+| Redis (dump Job)   | `S3_ENDPOINT` env | bare host:port (from projected Secret); `https://` prepended when unscheme'd |
 
 The projected `cozy-backups-creds.endpoint` key is **stripped of scheme** so chart-emitted sidecars (ClickHouse) consume it directly. Drivers that need the full URL receive the resolved endpoint described above — derived from the COSI system Secret (forced `https://`) for a provisioned bucket, or the `backupStorage.endpoint` fallback for external S3.
 
@@ -120,10 +122,14 @@ The bucket lives in `tenant-root` and is provisioned through the `apps.cozystack
 
 | Key                                           | Consumer                                  |
 |-----------------------------------------------|-------------------------------------------|
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | CNPG, MariaDB, Etcd, RabbitMQ             |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | CNPG, MariaDB, Etcd, RabbitMQ, Redis      |
 | `accessKey` / `secretKey` (plus `bucketName`, `endpoint`, `region`) | ClickHouse sidecar  |
 | `cloud`                                       | Velero (AWS credentials file format)      |
 | `blob_credentials.json`                       | FoundationDB backup_agent                 |
+
+The Redis dump Job additionally reads the `endpoint`, `bucketName`, and `region` keys (alongside the `AWS_*` pair) via `secretKeyRef`, the same set the ClickHouse sidecar consumes.
+
+The dump Job also speaks to the Redis app's own Sentinel and master, which is a separate TLS axis from the S3 endpoint above. When the `Redis` app has `tls.enabled`, the operator moves both to a TLS-only listener and publishes the CA at `redis-<app>.ca-cert`; the Job mounts that Secret optionally and connects with `--tls --cacert` exactly when its `ca.crt` is present, so a plaintext (non-TLS) app is unaffected. This covers the default `tls.authClients: no`. Mutual TLS (`authClients: yes`) is not supported for backup — it requires a client certificate signed by the release CA, which the platform does not issue.
 
 ### Bootstrap window
 
@@ -197,7 +203,7 @@ The default-objects gate emits three more:
 
 ## Admin overrides for `cozy-default`
 
-`cozy-default` is rendered by the `backupstrategy-controller` chart and owned by Flux's helm-controller. **Direct `kubectl edit backupclass cozy-default` is overwritten on the next helm reconcile** — the same applies to its companion `strategy.backups.cozystack.io/*` CRs (`cozy-default-cnpg`, `cozy-default-etcd`, `cozy-default-mariadb`, `cozy-default-altinity`, `cozy-default-mongodb`, `cozy-default-foundationdb`, `cozy-default-rabbitmq`, the two `cozy-default-velero-*`). The supported override path is the `backupStorage` block on the **`platform` component** of the `cozystack.cozystack-platform` Package CR:
+`cozy-default` is rendered by the `backupstrategy-controller` chart and owned by Flux's helm-controller. **Direct `kubectl edit backupclass cozy-default` is overwritten on the next helm reconcile** — the same applies to its companion `strategy.backups.cozystack.io/*` CRs (`cozy-default-cnpg`, `cozy-default-etcd`, `cozy-default-mariadb`, `cozy-default-altinity`, `cozy-default-mongodb`, `cozy-default-foundationdb`, `cozy-default-rabbitmq`, `cozy-default-redis`, the two `cozy-default-velero-*`). The supported override path is the `backupStorage` block on the **`platform` component** of the `cozystack.cozystack-platform` Package CR:
 
 ```yaml
 apiVersion: cozystack.io/v1alpha1
@@ -221,13 +227,29 @@ spec:
 
 The platform chart forwards this block into the child `Package cozystack.backupstrategy-controller` as `components.backupstrategy-controller.values.backupStorage` (`packages/core/platform/templates/bundles/system.yaml`), from where the cozystack operator merges it into the `backupstrategy-controller` HelmRelease over the chart defaults. Two paths that look plausible do **not** work: `spec.components.backupstrategy-controller` on the `cozystack.cozystack-platform` Package is silently ignored (the only component under that PackageSource is `platform`), and patching the child `Package cozystack.backupstrategy-controller` directly is reverted whenever the platform helm-reconcile re-renders it.
 
+A sibling `backupStrategyController` block on the same `platform` component is forwarded the same way, for the controller's own knobs rather than the bucket. The one an operator reaches for is `redisBackupResources`, which sizes the Redis strategy Pod — restore loads the whole dataset into a throwaway loader, so a large Redis needs more memory / ephemeral-storage than the defaults (the loader-not-ready log line points here):
+
+```yaml
+spec:
+  components:
+    platform:
+      values:
+        backupStrategyController:
+          redisBackupResources:
+            limits:
+              memory: 8Gi
+              ephemeral-storage: 32Gi
+```
+
 | Knob | Effect |
 |---|---|
 | `provisionBucket` | Toggle creation of the in-cluster `apps.cozystack.io/Bucket` CR. Set `false` for external S3 (see [Disabling the platform-managed bucket](#disabling-the-platform-managed-bucket)). |
 | `bucketName` | Two modes. With `provisionBucket: true` (default): K8s name of the Bucket CR + lookup key for the COSI BucketClaim — the actual S3 bucket name is the COSI-assigned UUID, surfaced through `BucketClaim.status.bucketName`. With `provisionBucket: false`: taken **verbatim as the real S3 bucket name** and baked into every strategy CR + the Velero BSL. |
 | `namespace` | Namespace the Bucket CR (and its system-credentials Secret) lives in — `tenant-root` by default. Must be a tenant namespace (`tenant-*`): the Bucket chart's RBAC helper fails the Helm render for any other prefix. |
 | `bucketNameOverride` | Escape hatch for offline `helm template` renders — bypasses the live-cluster BucketClaim lookup. Leave empty in production. |
-| `endpoint` | **Fallback** S3 endpoint. For a provisioned bucket the strategy CRs + Velero BSL derive the endpoint from the COSI system Secret (external ACME ingress, forced `https://`) instead; this value is used only for external S3 (`provisionBucket: false`) and offline renders. For external S3, switching it to `https://` enables TLS in the MariaDB/FoundationDB strategies — ensure the CA bundle is reachable to the relevant operator/driver Pods first. |
+| `endpoint` | **Fallback** S3 endpoint. For a provisioned bucket the strategy CRs + Velero BSL derive the endpoint from the COSI system Secret (external ACME ingress, forced `https://`) instead; this value is used only for external S3 (`provisionBucket: false`) and offline renders. For external S3, switching it to `https://` enables TLS in the MariaDB/FoundationDB strategies, which derive TLS from the scheme. The Redis dump Job is not scheme-driven: the projector delivers a bare host and the script prepends `https://` unconditionally, so the Job always connects over TLS — point `endpointCASecretName` (below) at the private CA rather than relying on the scheme, and ensure that CA is reachable to the relevant Pods. |
+| `endpointCASecretName` | Optional Secret (key `ca.crt`) in the app namespace the Redis Job trusts for a self-signed S3 endpoint. Empty by default: the projected endpoint is always `https://` and the platform bucket's ACME cert verifies against the image's system CA store unaided. Set it only for a private CA. The Job mounts it optionally (nothing projects this Secret automatically), so a name typo does not wedge the Pod on `FailedMount`: a missing `ca.crt` falls through to the system CA store and the Job fails fast at the TLS handshake with a legible error — it does not skip verification, which still needs the explicit `insecureSkipTLSVerify` opt-in. |
+| `insecureSkipTLSVerify` | Disables S3 certificate verification for the Redis Job (`curl -k`). `false` by default and an explicit opt-in, never a fallback — an untrusted-cert endpoint fails closed unless this is set. Prefer `endpointCASecretName`. |
 | `region` | Re-projected into `cozy-backups-creds` on the next reconcile. Pod-restart required for chart-emitted clients consuming the region via env (ClickHouse sidecar today). |
 | `forcePathStyle` | Path-style addressing; SeaweedFS S3 requires it, AWS S3 typically doesn't. |
 | `systemSecretName` | Name of the human-friendly Secret produced by the Bucket app (or pre-created manually for external S3). The projector also accepts the raw COSI Secret format. |

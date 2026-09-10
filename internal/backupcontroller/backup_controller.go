@@ -170,6 +170,13 @@ func (r *BackupReconciler) cleanupOnDelete(ctx context.Context, backup *backupsv
 		// WAITS for that delete to complete before the Backup is removed, so no
 		// object is orphaned (see cleanupRabbitmqBackup).
 		return r.cleanupRabbitmqBackup(ctx, backup)
+	case strategyv1alpha1.RedisStrategyKind:
+		// Like Rabbitmq, the Redis driver OWNS its artifact - redisObjectKey
+		// mints one object per BackupJob and no engine retention prunes it - so
+		// this branch deletes that object and WAITS for the delete before the
+		// Backup is removed. Without it a retention-pruned Plan grows the bucket
+		// unboundedly and the key is lost with the CR (see cleanupRedisBackup).
+		return r.cleanupRedisBackup(ctx, backup)
 	case strategyv1alpha1.VeleroStrategyKind:
 		return ctrl.Result{}, r.cleanupVeleroBackup(ctx, backup)
 	default:
