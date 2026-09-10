@@ -210,6 +210,14 @@ tests:
     asserts:
       - failedTemplate: {errorMessage: "cozy-lib.keda.scaledObject: minReplicaCount must be >= 0"}
 
+  # a fractional negative like -0.5 truncates toward zero through `int`, so the guard
+  # must test the untruncated value or it would render a scale-to-zero-capable object
+  - it: fails closed when minReplicaCount is a fractional negative
+    templates: [templates/tests/keda-scaledobject-arg.yaml]
+    set: {negFracMin: true}
+    asserts:
+      - failedTemplate: {errorMessage: "cozy-lib.keda.scaledObject: minReplicaCount must be >= 0"}
+
   - it: merges a caller-supplied annotation onto the ScaledObject
     templates: [templates/tests/keda-scaledobject-arg.yaml]
     set: {wantAnnotations: true}
@@ -217,3 +225,20 @@ tests:
       - equal:
           path: metadata.annotations["cozystack.io/example"]
           value: hi
+
+  # the pause pair is the merge destination, so it wins a key collision: the caller
+  # passes paused-scale-in="false" and a distinct key, and on the paused render the
+  # distinct key survives while the pause value overrides the caller's "false"
+  - it: merges a caller annotation under the pause pair and wins the collision when paused
+    templates: [templates/tests/keda-scaledobject-arg.yaml]
+    set: {wantPausedMerge: true}
+    asserts:
+      - equal:
+          path: metadata.annotations["cozystack.io/example"]
+          value: hi
+      - equal:
+          path: metadata.annotations["autoscaling.keda.sh/paused-scale-in"]
+          value: "true"
+      - equal:
+          path: metadata.annotations["autoscaling.keda.sh/paused-scale-out"]
+          value: "true"
