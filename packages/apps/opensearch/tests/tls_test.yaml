@@ -1408,3 +1408,33 @@ tests:
           path: spec.dnsNames[3]
           value: os-test.tenant-test.svc.cozy.local
         documentIndex: 3
+
+---
+---
+###############################################################################
+# security.yaml — the same read, on a path that renders no certificate
+###############################################################################
+#
+# Its own suite rather than a second test in the one above, because helm-unittest
+# renders every template a suite declares for every test in it: listing both would
+# make the certificate test report a security.yaml render error, a reason that has
+# nothing to do with what it asserts.
+suite: cluster domain defaulting without _cluster in the credentials Secret
+
+templates:
+  - templates/security.yaml
+
+release:
+  name: os-test
+  namespace: tenant-test
+
+tests:
+  # This template renders under either issuer, so an unguarded read here takes
+  # down a release that mints no certificate at all. The host it composes is the
+  # one the tenant connects to.
+  - it: falls back to the default cluster domain when _cluster is absent
+    asserts:
+      - equal:
+          path: stringData.host
+          value: os-test.tenant-test.svc.cozy.local
+        documentIndex: 2
