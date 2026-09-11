@@ -13,9 +13,9 @@ baseline through the apiserver's PodSecurityConfiguration; that default rejects
 the container outright (cozystack/cozystack#4131).
 
 This DaemonSet carries the value instead, from a namespace the platform labels
-enforce=privileged. It removes the reason for an OpenSearch pod to ask the
-operator for the sysctl. The app chart still asks, and dropping that request is
-a separate change.
+enforce=privileged, and it is the only carrier: the app chart sets
+spec.general.setVMMaxMapCount to false, so no OpenSearch pod asks the operator
+for the sysctl.
 
 system-node-critical buys scheduling priority, not start ordering: on a freshly
 joined node an OpenSearch pod can still start before this one has written the
