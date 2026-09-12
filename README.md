@@ -60,7 +60,7 @@ If you have a **concrete feature request**, [open an issue](https://github.com/c
 
 ## Community
 
-You are welcome to join us in [#cozystack on CNCF Slack](https://cloud-native.slack.com/archives/C08BQJD95J7) or [#cozystack on Kubernetes Slack](https://kubernetes.slack.com/archives/C06L3CPRVN1), join our [Telegram group](https://t.me/cozystack), and come to our community meetings.
+You are welcome to join us in **#cozystack**, on either [CNCF Slack](https://cloud-native.slack.com/archives/C08BQJD95J7) ([get an invite](https://cncf-slack.netlify.app/)) or [Kubernetes Slack](https://kubernetes.slack.com/archives/C06L3CPRVN1) ([get an invite](https://slack.kubernetes.io/)), in our [Telegram group](https://t.me/cozystack), and at our community meetings.
 Add them to your [Google Calendar](https://calendar.google.com/calendar?cid=ZTQzZDIxZTVjOWI0NWE5NWYyOGM1ZDY0OWMyY2IxZTFmNDMzZTJlNjUzYjU2ZGJiZGE3NGNhMzA2ZjBkMGY2OEBncm91cC5jYWxlbmRhci5nb29nbGUuY29t) or [iCal](https://calendar.google.com/calendar/ical/e43d21e5c9b45a95f28c5d649c2cb1e1f433e2e653b56dbbda74ca306f0d0f68%40group.calendar.google.com/public/basic.ics) for convenience.
 
 ## Project documents
