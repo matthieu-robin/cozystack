@@ -46,8 +46,6 @@ If you encounter any difficulties, start with the [troubleshooting guide](https:
 Versioning adheres to the [Semantic Versioning](https://semver.org/) principles.  
 A full list of the available releases is available in the GitHub repository's [Release](https://github.com/cozystack/cozystack/releases) section.
 
-- [Roadmap](ROADMAP.md)
-
 ## Contributions
 
 Contributions are highly appreciated and very welcomed!
@@ -55,7 +53,7 @@ Contributions are highly appreciated and very welcomed!
 In case of bugs, please check if the issue has already been opened by checking the [GitHub Issues](https://github.com/cozystack/cozystack/issues) section.
 If it isn't, you can open a new one. A detailed report will help us replicate it, assess it, and work on a fix.
 
-You are welcome to take the fix on yourself.
+You are welcome to take on the fix yourself.
 Commits are used to generate the changelog, and their author will be referenced in it.
 
 If you have a **concrete feature request**, [open an issue](https://github.com/cozystack/cozystack/issues/new/choose). For a **cross-cutting or architectural change**, open a [design proposal](https://github.com/cozystack/community/tree/main/design-proposals) in the [community](https://github.com/cozystack/community) repo. For **questions or early ideas**, use [GitHub Discussions](https://github.com/cozystack/cozystack/discussions). See [CONTRIBUTING.md](CONTRIBUTING.md#where-do-i-file) for the full routing.
@@ -67,7 +65,7 @@ Add them to your [Google Calendar](https://calendar.google.com/calendar?cid=ZTQz
 
 ## Project documents
 
-| | |
+| Document | What it covers |
 |---|---|
 | [Governance](GOVERNANCE.md) | How decisions are made and who makes them |
 | [Contributor Ladder](CONTRIBUTOR_LADDER.md) | How to grow from contributor to maintainer |
